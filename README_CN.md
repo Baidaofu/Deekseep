@@ -6,6 +6,8 @@ DeepSeek 进程中，提供可选的模块设置入口和兼容层。本项目�
 [English](README.md)
 
 > 💬 **QQ 交流群：1106465300** — 欢迎进群反馈问题、交流使用心得！
+>
+> ✈️ **Telegram 交流群：** [@Deekseepapp](https://t.me/Deekseepapp)
 
 ## 当前稳定版
 
@@ -59,3 +61,5 @@ Closed 版，Closed 版源码不公开；除本地 API 及闭源保护组件外�
 **赞助作者以加速开发：** [爱发电](https://www.afdian.com/a/lllucccian)
 
 **用户交流：** 💬 QQ 群 1106465300
+
+**Telegram：** ✈️ [@Deekseepapp](https://t.me/Deekseepapp)
