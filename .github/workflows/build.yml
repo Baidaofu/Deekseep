@@ -24,11 +24,23 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
+      # The runner image already ships the SDK. android-actions/setup-android is
+      # deliberately not used: it still installs the retired "tools" package,
+      # which no longer exists in current cmdline-tools and aborts the job.
       - name: Install Android platform and build tools
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$SM" ]; then
+            echo "sdkmanager not found under $SDK/cmdline-tools" >&2
+            exit 1
+          fi
+          yes | "$SM" --licenses >/dev/null 2>&1 || true
+          "$SM" --install "platforms;android-35" "build-tools;35.0.0"
+          ls "$SDK/build-tools"
 
       - name: Prepare local debug signing key
         run: |
