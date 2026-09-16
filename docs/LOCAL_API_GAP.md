@@ -91,7 +91,7 @@
 | # | 能力 | 闭源版实现要点 | 开源复刻状态 |
 |---|---|---|---|
 | 0 | 驱动宿主的后端 | 复用宿主会话与网络栈，带会话凭证 | ✅ 已实现（`Main.NativeBridge`：临时会话 + 宿主 PoW + 宿主 Flow 流式读取） |
-| 1 | HTTP(S) 监听 + 鉴权 | `0.0.0.0:8765`，Bearer Key，可自定义端口/Key/轮换 | ⚠️ 已实现，但默认只听回环、默认关闭（见下） |
+| 1 | HTTP(S) 监听 + 鉴权 | `0.0.0.0:8765`，Bearer Key，可自定义端口/Key/轮换 | ✅ 已实现；默认关闭，且开启后默认只绑回环，需显式打开「允许局域网访问」才暴露到局域网（见下） |
 | 2 | OpenAI 协议 | `/v1/models`、`/v1/chat/completions`、`/v1/responses`，JSON + SSE | ✅ 已实现 |
 | 3 | Anthropic 协议 | `/v1/messages`、`/v1/messages/count_tokens`，`thinking` 块 | ✅ 已实现 |
 | 4 | 每设备 CA + HTTPS | 自签 CA、SAN 含回环与 LAN、导出 Magisk 模块 / 用户证书 | ✅ 已实现 |

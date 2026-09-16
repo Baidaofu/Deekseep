@@ -95,7 +95,9 @@ public final class DeekseepUi {
             new FeatureSearchEntry("灰度功能管理器", "远程配置 feature flags", CATEGORY_ENGINEERING),
             new FeatureSearchEntry("自动清理缓存", "图片 Mermaid Coil", CATEGORY_ENGINEERING),
             new FeatureSearchEntry("进程管理", "进程 冻结 解冻 杀死 Root", CATEGORY_ENGINEERING),
-            new FeatureSearchEntry("Agent", "工具 Root Shizuku", CATEGORY_ENGINEERING)
+            new FeatureSearchEntry("Agent", "工具 Root Shizuku", CATEGORY_ENGINEERING),
+            new FeatureSearchEntry("本地 API", "local api openai anthropic 端口 密钥 接口",
+                    CATEGORY_ENGINEERING)
     };
 
     private static void refreshPromptControls() {
@@ -1432,6 +1434,13 @@ public final class DeekseepUi {
                 "管理本地工具、权限模式以及 Root / Shizuku 后端。",
                 textColor, subColor, new View.OnClickListener() {
                     @Override public void onClick(View v) { AgentSettingsUi.show(act); }
+                }));
+
+        card.addView(makeDivider(act, divColor));
+        card.addView(toolActionRow(act, "本地 API · 实验性",
+                "在手机上提供 OpenAI / Anthropic 兼容接口，可设置端口、密钥与协议。",
+                textColor, subColor, new View.OnClickListener() {
+                    @Override public void onClick(View v) { LocalApiUi.show(act); }
                 }));
 
         filterCategoryRows(card, category);

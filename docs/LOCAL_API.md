@@ -11,14 +11,19 @@ Local API 在手机上的 DeepSeek 进程内起一个 HTTP(S) 服务，对外提
 
 ## 1. 快速开始
 
-1. 在 LSPosed 中启用 Deekseep，作用域只勾选 `com.deepseek.chat`。
-2. 打开 DeepSeek → 设置 → Deekseep → **Local API · Experimental**。
-3. 打开 **Enable local API service**。
-4. 复制 **Copy URL** 得到的地址与 **Copy API key** 得到的密钥，填进你的客户端。
-   - OpenAI 客户端：`base_url = http://<手机IP>:8765/v1`
-   - Anthropic 客户端：`base_url = http://<手机IP>:8765`（**无** `/v1` 后缀）
+入口在 DeepSeek 自己的设置里，不在模块 APK 的独立界面：
 
-> 监听地址固定为 `0.0.0.0`，局域网内可达。**因此即使从本机访问也必须带 API Key。**
+1. 在 LSPosed 中启用 Deekseep，作用域只勾选 `com.deepseek.chat`。
+2. 打开 DeepSeek → 侧边栏 → 底部 **⋯** → **设置** → 右上角 **Deekseep** →
+   **工程** → **本地 API · 实验性**。
+3. 打开 **启用本地 API / Enable Local API**。
+4. **要连接本机之外，再打开「允许局域网访问」。** 默认只监听 `127.0.0.1`，
+   只有手机自己（以及 `adb forward`）能连上。
+5. 点 **复制连接信息 / Copy connection details**，把地址与密钥填进客户端：
+   - OpenAI 客户端：`base_url = http://<地址>:8765/v1`
+   - Anthropic 客户端：`base_url = http://<地址>:8765`（**无** `/v1` 后缀）
+
+> 无论绑定哪个地址，**每个请求都必须带 API Key**，包括来自回环的请求。
 
 ---
 
@@ -73,6 +78,7 @@ Local API 在手机上的 DeepSeek 进程内起一个 HTTP(S) 服务，对外提
 | Custom listener port（1024–65535） | 同上 | `8765` |
 | Custom API key（8–256 位无空格 ASCII） | 同上 | 首次自动生成 64 位十六进制 |
 | Enable HTTPS | 同上 | 关 |
+| **Allow LAN access** | 同上 | **关（只绑 `127.0.0.1`）** |
 | Serial request policy | 同上 | 开 |
 | Local API anti-censor | 同上 | 关 |
 | Inject system prompt / 提示词 | 同上 | 关 / 空 |
@@ -162,6 +168,11 @@ module/src/com/dsmod/probe/localapi/
 ├── KeepAliveService.java  前台保活服务
 └── PublicTunnel.java      公网入口状态机与校验
 ```
+
+界面不在这个包里：`module/src/com/dsmod/probe/LocalApiUi.java` 是宿主进程内的设置页
+（DeepSeek → 设置 → Deekseep → 工程 → 本地 API）。它必须留在 `com.dsmod.probe` 包，
+因为 `UiLanguage` / `DeekseepUi` 都是包内可见。改端口、HTTPS、协议、绑定地址后
+页面会**就地重启监听**，不需要退出 DeepSeek 再进。
 
 ### 扩展点
 需要改接入方式时，实现 `HostBackend.Bridge` 并通过 `LocalApi.setBackend(...)` 注入即可，

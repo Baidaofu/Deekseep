@@ -48,6 +48,7 @@ public final class LocalApiConfig {
         public final String protocolMode;
         public final String apiKey;
         public final boolean https;
+        public final boolean allowLan;
         public final boolean keepAliveNotification;
         public final boolean serialRequests;
         public final boolean antiCensor;
@@ -60,15 +61,16 @@ public final class LocalApiConfig {
         public final boolean autoRecovery;
 
         State(boolean enabled, int port, String protocolMode, String apiKey, boolean https,
-                boolean keepAliveNotification, boolean serialRequests, boolean antiCensor,
-                boolean injectSystemPrompt, String systemPrompt, boolean longContextRelay,
-                boolean forceReasoning, String customModelsJson, String publicRootUrl,
-                boolean autoRecovery) {
+                boolean allowLan, boolean keepAliveNotification, boolean serialRequests,
+                boolean antiCensor, boolean injectSystemPrompt, String systemPrompt,
+                boolean longContextRelay, boolean forceReasoning, String customModelsJson,
+                String publicRootUrl, boolean autoRecovery) {
             this.enabled = enabled;
             this.port = port;
             this.protocolMode = protocolMode;
             this.apiKey = apiKey;
             this.https = https;
+            this.allowLan = allowLan;
             this.keepAliveNotification = keepAliveNotification;
             this.serialRequests = serialRequests;
             this.antiCensor = antiCensor;
@@ -84,6 +86,7 @@ public final class LocalApiConfig {
         boolean get(String key) {
             if ("enabled".equals(key)) return enabled;
             if ("https".equals(key)) return https;
+            if ("allowLan".equals(key)) return allowLan;
             if ("keepAliveNotification".equals(key)) return keepAliveNotification;
             if ("serialRequests".equals(key)) return serialRequests;
             if ("antiCensor".equals(key)) return antiCensor;
@@ -158,6 +161,14 @@ public final class LocalApiConfig {
 
     public static void setHttps(boolean value) {
         update("https", value);
+    }
+
+    public static void setAllowLan(boolean value) {
+        update("allowLan", value);
+    }
+
+    public static void setKeepAliveNotification(boolean value) {
+        update("keepAliveNotification", value);
     }
 
     public static void setSerialRequests(boolean value) {
@@ -258,7 +269,7 @@ public final class LocalApiConfig {
 
     private static State defaults() {
         return new State(false, DEFAULT_PORT, ApiContract.PROTOCOL_OPENAI, generateKey(), false,
-                true, true, false, false, "", true, false, "[]", "", true);
+                false, true, true, false, false, "", true, false, "[]", "", true);
     }
 
     private static State fromJson(JSONObject json, State fallback) {
@@ -271,6 +282,7 @@ public final class LocalApiConfig {
                                 : ApiContract.PROTOCOL_OPENAI,
                 keyOrGenerate(json.optString("apiKey", null)),
                 json.optBoolean("https", fallback.https),
+                json.optBoolean("allowLan", fallback.allowLan),
                 json.optBoolean("keepAliveNotification", fallback.keepAliveNotification),
                 json.optBoolean("serialRequests", fallback.serialRequests),
                 json.optBoolean("antiCensor", fallback.antiCensor),
@@ -314,13 +326,14 @@ public final class LocalApiConfig {
             }
         }
         if ("https".equals(key)) value = (Boolean) value;
-        boolean[] flags = new boolean[] {current.enabled, current.https,
+        if ("allowLan".equals(key)) value = (Boolean) value;
+        boolean[] flags = new boolean[] {current.enabled, current.https, current.allowLan,
                 current.keepAliveNotification, current.serialRequests, current.antiCensor,
                 current.injectSystemPrompt, current.longContextRelay, current.forceReasoning,
                 current.autoRecovery};
-        String[] flagKeys = new String[] {"enabled", "https", "keepAliveNotification",
-                "serialRequests", "antiCensor", "injectSystemPrompt", "longContextRelay",
-                "forceReasoning", "autoRecovery"};
+        String[] flagKeys = new String[] {"enabled", "https", "allowLan",
+                "keepAliveNotification", "serialRequests", "antiCensor", "injectSystemPrompt",
+                "longContextRelay", "forceReasoning", "autoRecovery"};
         for (int i = 0; i < flagKeys.length; i++) {
             if (flagKeys[i].equals(key)) {
                 flags[i] = ((Boolean) value).booleanValue();
@@ -331,13 +344,13 @@ public final class LocalApiConfig {
                 key.equals("port") ? ((Integer) value).intValue() : current.port,
                 key.equals("protocolMode") ? String.valueOf(value) : current.protocolMode,
                 key.equals("apiKey") ? String.valueOf(value) : current.apiKey,
-                flags[1], flags[2], flags[3], flags[4], flags[5],
+                flags[1], flags[2], flags[3], flags[4], flags[5], flags[6],
                 key.equals("systemPrompt") ? String.valueOf(value) : current.systemPrompt,
-                flags[6], flags[7],
+                flags[7], flags[8],
                 key.equals("customModelsJson") ? String.valueOf(value)
                         : current.customModelsJson,
                 key.equals("publicRootUrl") ? String.valueOf(value) : current.publicRootUrl,
-                flags[8]);
+                flags[9]);
     }
 
     private static void persist(State snapshot) {
@@ -352,6 +365,7 @@ public final class LocalApiConfig {
             json.put("protocolMode", snapshot.protocolMode);
             json.put("apiKey", snapshot.apiKey);
             json.put("https", snapshot.https);
+            json.put("allowLan", snapshot.allowLan);
             json.put("keepAliveNotification", snapshot.keepAliveNotification);
             json.put("serialRequests", snapshot.serialRequests);
             json.put("antiCensor", snapshot.antiCensor);
@@ -429,6 +443,7 @@ public final class LocalApiConfig {
             json.put("port", snapshot.port);
             json.put("protocolMode", snapshot.protocolMode);
             json.put("https", snapshot.https);
+            json.put("allowLan", snapshot.allowLan);
             json.put("serialRequests", snapshot.serialRequests);
             json.put("antiCensor", snapshot.antiCensor);
             json.put("injectSystemPrompt", snapshot.injectSystemPrompt);

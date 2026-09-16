@@ -1,6 +1,7 @@
 package com.dsmod.probe.localapi;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.util.ArrayList;
@@ -17,8 +18,8 @@ import javax.net.ssl.SSLServerSocketFactory;
  * <p>Security model is deliberately simple and documented rather than clever:
  * <ul>
  *   <li>every request must carry {@code Authorization: Bearer <key>};</li>
- *   <li>the listener binds to all interfaces because LAN clients must reach it,
- *       which is exactly why the key is mandatory even from loopback;</li>
+ *   <li>the listener binds to loopback unless the user turns on LAN access,
+ *       which is why the key is mandatory even from loopback;</li>
  *   <li>HTTPS is optional and backed by a per-device CA, see
  *       {@link TlsDirector}.</li>
  * </ul>
@@ -49,20 +50,25 @@ public final class LocalApiServer implements HttpServer.Handler {
             return true;
         }
         LocalApiConfig.State state = LocalApiConfig.get();
+        // Loopback unless the user explicitly opts into LAN exposure: publishing
+        // somebody's model session to every device on the network is not a
+        // sensible default.
+        InetAddress address = state.allowLan
+                ? null : InetAddress.getLoopbackAddress();
         ServerSocket socket;
         if (state.https) {
-            socket = openTlsSocket(context, state.port);
+            socket = openTlsSocket(context, state.port, address);
         } else {
             socket = new ServerSocket();
             socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(state.port));
+            socket.bind(new InetSocketAddress(address, state.port));
         }
         HttpServer http = new HttpServer(this, WORKERS);
         http.start(socket);
         this.server = http;
         this.httpPort = http.boundPort();
         this.httpsPort = state.https ? http.boundPort() : 0;
-        this.boundHost = "0.0.0.0";
+        this.boundHost = state.allowLan ? "0.0.0.0" : "127.0.0.1";
         return true;
     }
 
@@ -98,16 +104,27 @@ public final class LocalApiServer implements HttpServer.Handler {
 
     /** Base URL advertised to OpenAI style clients. */
     public String openAiBaseUrl() {
-        String host = TlsDirector.lanAddress();
-        String authority = host == null ? "127.0.0.1" : host;
-        return scheme() + "://" + authority + ":" + (httpsPort > 0 ? httpsPort : httpPort) + "/v1";
+        return authority() + "/v1";
     }
 
     /** Base URL advertised to Anthropic style clients (no {@code /v1} suffix). */
     public String anthropicBaseUrl() {
+        return authority();
+    }
+
+    /**
+     * Host clients should dial.
+     *
+     * <p>Reports the loopback address while the listener is loopback only, so the
+     * settings screen never advertises a URL that other machines cannot reach.
+     */
+    private String authority() {
+        if (!LocalApiConfig.get().allowLan) {
+            return scheme() + "://127.0.0.1:" + (httpsPort > 0 ? httpsPort : httpPort);
+        }
         String host = TlsDirector.lanAddress();
-        String authority = host == null ? "127.0.0.1" : host;
-        return scheme() + "://" + authority + ":" + (httpsPort > 0 ? httpsPort : httpPort);
+        String name = host == null ? "127.0.0.1" : host;
+        return scheme() + "://" + name + ":" + (httpsPort > 0 ? httpsPort : httpPort);
     }
 
     public String loopbackRoot() {
@@ -116,7 +133,8 @@ public final class LocalApiServer implements HttpServer.Handler {
 
     // ------------------------------------------------------------ tls socket
 
-    private ServerSocket openTlsSocket(android.content.Context context, int port) throws Exception {
+    private ServerSocket openTlsSocket(android.content.Context context, int port,
+            InetAddress address) throws Exception {
         TlsDirector.prepare(context);
         TlsDirector.Material material = TlsDirector.material(context);
         KeyManagerFactory managers = KeyManagerFactory.getInstance(
@@ -131,7 +149,7 @@ public final class LocalApiServer implements HttpServer.Handler {
         socket.setUseClientMode(false);
         socket.setNeedClientAuth(false);
         socket.setWantClientAuth(false);
-        socket.bind(new InetSocketAddress(port));
+        socket.bind(new InetSocketAddress(address, port));
         return socket;
     }
 
