@@ -15,12 +15,11 @@ OUT="build/local-api-test"
 rm -rf "$OUT"
 mkdir -p "$OUT/classes"
 
+# The universal build generates its own HostCompat copy; compile against the
+# module source, which is the one that is actually maintained.
 SOURCES=(src/com/dsmod/probe/localapi/*.java
-         ../module-universal/src/com/dsmod/probe/HostCompat.java
+         src/com/dsmod/probe/HostCompat.java
          tests/com/dsmod/probe/localapi/LocalApiProtocolRegressionTest.java)
-
-# The universal build ships its own HostCompat copy; prefer the module source.
-SOURCES[1]="src/com/dsmod/probe/HostCompat.java"
 
 if ! javac -source 8 -target 8 -encoding UTF-8 \
         -cp "$ANDROID_JAR" -d "$OUT/classes" "${SOURCES[@]}" 2> "$OUT/javac.err"; then

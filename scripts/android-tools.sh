@@ -54,9 +54,14 @@ resolve_android_tool() {
         fi
     fi
 
-    candidate="$(find "$SDK_ROOT/build-tools" -mindepth 2 -maxdepth 2 \
-        -name "$name" -type f 2>/dev/null | sort -V | tail -n 1)"
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    # The SDK ships Windows tools with an extension (aapt2.exe, d8.bat), so a
+    # bare -name match silently finds nothing on that platform.
+    candidate="$(find "$SDK_ROOT/build-tools" -mindepth 2 -maxdepth 2 -type f \
+        \( -name "$name" -o -name "$name.exe" -o -name "$name.bat" \) \
+        2>/dev/null | sort -V | tail -n 1)"
+    # Existence is enough here. A .bat wrapper in the Windows SDK carries no
+    # executable bit, so -x would reject a perfectly usable tool.
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
         printf '%s\n' "$candidate"
         return 0
     fi
