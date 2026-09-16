@@ -191,6 +191,10 @@ final class UiLanguageCatalog {
                 "Manage local tools, permission mode, and Root / Shizuku backends.");
         add("配置兼容接口、后台保活、密钥、监听地址和请求统计。",
                 "Configure compatible endpoints, background keepalive, keys, listeners, and request statistics.");
+        add("本地 API · 实验性", "Local API · Experimental");
+        add("本地 API", "Local API");
+        add("local api openai anthropic 端口 密钥 接口",
+                "local api openai anthropic port key endpoint");
         add("禁用热更新 · 实验性", "Disable hot updates · Experimental");
         add("阻止 DeepSeek 展示普通或强制更新弹窗；不影响商店手动更新。",
                 "Prevent DeepSeek from showing normal or forced update dialogs; manual store updates are unaffected.");

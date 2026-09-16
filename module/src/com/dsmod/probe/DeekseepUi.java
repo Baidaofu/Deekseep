@@ -1438,7 +1438,7 @@ public final class DeekseepUi {
 
         card.addView(makeDivider(act, divColor));
         card.addView(toolActionRow(act, "本地 API · 实验性",
-                "在手机上提供 OpenAI / Anthropic 兼容接口，可设置端口、密钥与协议。",
+                "配置兼容接口、后台保活、密钥、监听地址和请求统计。",
                 textColor, subColor, new View.OnClickListener() {
                     @Override public void onClick(View v) { LocalApiUi.show(act); }
                 }));
