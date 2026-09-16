@@ -27,6 +27,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.dsmod.probe.localapi.ApiContract;
+import com.dsmod.probe.localapi.KeepAliveService;
 import com.dsmod.probe.localapi.LocalApi;
 import com.dsmod.probe.localapi.LocalApiConfig;
 import com.dsmod.probe.localapi.LocalApiStats;
@@ -325,6 +326,11 @@ final class LocalApiUi {
                     }
                 } else {
                     LocalApi.stop();
+                    try {
+                        activity.stopService(KeepAliveService.createIntent(activity));
+                    } catch (Throwable ignored) {
+                        // The service may never have been started.
+                    }
                     refresh[0].run();
                     return;
                 }
@@ -350,12 +356,10 @@ final class LocalApiUi {
 
         keepAlive.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton button, boolean checked) {
-                LocalApiConfig.get();
-                // keepAliveNotification has no dedicated setter beyond the flag itself.
                 applyFlag("keepAliveNotification", checked);
-                if (checked) {
-                    LocalApi.onHostResumed(activity);
-                }
+                // Reconciling through the same path the host resume hook uses keeps the
+                // service and the flag from drifting apart.
+                LocalApi.onHostResumed(activity);
             }
         });
 
