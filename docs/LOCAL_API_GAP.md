@@ -18,7 +18,7 @@
 | 功能内核（聊天/账号/外观/调试/工程/Agent/备份/通知/进程/特性开关） | 有 | 有（R8 混淆，同名类仍在 dex 中） |
 | **Local API（OpenAI / Anthropic 兼容服务端）** | **1.7.4-fix Open 起已自带开源实现**（`localapi/` 17 个类） | 有 |
 | Local API 主体代码位置 | `module/src/com/dsmod/probe/localapi/`，明文可读 | 加密载荷 `META-INF/com.dsmod.cloud/*`，运行时由 `II1O1_O` 解密并 `DexClassLoader` 加载为 `com.dsmod.probe.z1` |
-| Local API 后端（驱动宿主） | 仍是匿名 HTTP 兜底，**未接宿主会话** | 有（复用宿主网络栈，带会话凭证） |
+| Local API 后端（驱动宿主） | ✅ `Main.NativeBridge` 走宿主原生会话：临时会话 + 宿主 PoW + 宿主 Flow | 有（复用宿主网络栈，带会话凭证） |
 | HTTPS（每设备 CA） | 有（`TlsDirector` + 手写 `Der`，无第三方依赖） | 有（`z5`，内部代号 `dq0`） |
 | 后台保活前台服务 | 有（`KeepAliveService`） | 有（`z21`，通知渠道 `dq0`） |
 | 公网入口（Pinggy SSH / Cloudflare） | 抽象 + 校验层（`PublicTunnel`），未内置连接器 | 有（经 `com.dsmod.probe.XposedService` ContentProvider 调用） |
@@ -27,8 +27,9 @@
 | 免 Xposed 被动注入 | 无 | 有（`PassiveInjectionEntry`） |
 | 第三方库 | 无（纯 Android，`Der` 手写 DER 以避免引 BouncyCastle） | 打包了 JSch（SSH）等 |
 
-一句话：**除 Local API 外，其余功能两版一致；Local API 的协议层已开源复刻并在真机验证，
-只剩"驱动宿主会话"这一环仍是兜底实现。**
+一句话：**除 Local API 外，其余功能两版一致。** Local API 的协议层与后端都已开源复刻并在
+真机跑通（真实模型回复、流式逐帧均正常）。剩下三处是需要外部配置或宿主对接的收尾
+（隧道连接器、Agent 执行器、文件上传），以及两处刻意不做的体系（授权、插件）。
 
 ---
 
@@ -89,7 +90,8 @@
 
 | # | 能力 | 闭源版实现要点 | 开源复刻状态 |
 |---|---|---|---|
-| 1 | HTTP(S) 监听 + 鉴权 | `0.0.0.0:8765`，Bearer Key，可自定义端口/Key/轮换 | ✅ 已实现 |
+| 0 | 驱动宿主的后端 | 复用宿主会话与网络栈，带会话凭证 | ✅ 已实现（`Main.NativeBridge`：临时会话 + 宿主 PoW + 宿主 Flow 流式读取） |
+| 1 | HTTP(S) 监听 + 鉴权 | `0.0.0.0:8765`，Bearer Key，可自定义端口/Key/轮换 | ⚠️ 已实现，但默认只听回环、默认关闭（见下） |
 | 2 | OpenAI 协议 | `/v1/models`、`/v1/chat/completions`、`/v1/responses`，JSON + SSE | ✅ 已实现 |
 | 3 | Anthropic 协议 | `/v1/messages`、`/v1/messages/count_tokens`，`thinking` 块 | ✅ 已实现 |
 | 4 | 每设备 CA + HTTPS | 自签 CA、SAN 含回环与 LAN、导出 Magisk 模块 / 用户证书 | ✅ 已实现 |
@@ -120,8 +122,15 @@
    这些访问器在开源仓库里**原本就存在**（只是包级私有，已改为 `public`），
    因此复刻版沿用同一套映射；具体能否命中取决于 DeepSeek 版本，`HostBackend.Bridge`
    就是为此抽象出来的可替换点。
-3. **真机端到端尚未打通最后一环。** 协议层已在真机验证（见下表），但后端仍走匿名 HTTP
-   兜底，没有宿主会话凭证，所以会被上游 429 拒绝。接法见 [LOCAL_API.md](LOCAL_API.md) 第 10 节。
+3. **真机已端到端打通。** 协议层与后端都在 Android 16 / DeepSeek 2.3.6 上验证过：
+   非流式返回真实模型回复，流式逐帧输出正常，设备端 9 项回归全过。
+   实现细节见 [LOCAL_API.md](LOCAL_API.md) 第 10 节。
+
+### 与默认行为有关的一处刻意差异
+
+闭源版默认监听 `0.0.0.0:8765`，即局域网内任何设备都能访问。开源复刻**默认关闭**，
+且开启后默认只绑回环地址——把别人的大模型会话暴露到局域网是件后果不对称的事，
+这个开关应当由使用者主动、明确地打开。需要 LAN 或公网访问时再自行改配置。
 
 ---
 
