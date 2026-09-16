@@ -25,6 +25,8 @@ Local API 在手机上的 DeepSeek 进程内起一个 HTTP(S) 服务，对外提
 
 > 无论绑定哪个地址，**每个请求都必须带 API Key**，包括来自回环的请求。
 
+![本地 API 设置页](local-api-settings.png)
+
 ---
 
 ## 2. 接口
