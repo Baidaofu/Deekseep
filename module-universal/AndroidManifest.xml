@@ -13,6 +13,9 @@
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -64,6 +67,17 @@
             android:name="com.dsmod.probe.XposedActivationReceiver"
             android:enabled="true"
             android:exported="true" />
+
+        <!-- Local API keepalive. Not exported: only the in-process hook starts it. -->
+        <service
+            android:name="com.dsmod.probe.localapi.KeepAliveService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Exposes a local OpenAI-compatible API endpoint for the user's own clients" />
+        </service>
 
         <receiver
             android:name="com.dsmod.probe.ProactiveHeartbeatReceiver"

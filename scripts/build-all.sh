@@ -27,6 +27,9 @@ echo
 echo "=== Running expert relay multi-turn regression test ==="
 (cd "$ROOT/module" && bash test-expert-relay-regression.sh)
 
+echo "=== Running Local API protocol regression test ==="
+(cd "$ROOT/module" && bash test-local-api-regression.sh)
+
 echo
 echo "=== Running traditional-Xposed adapter regression test ==="
 (cd "$ROOT/module-legacy" && bash test-adapter-regression.sh)

@@ -46,7 +46,7 @@ if [[ ! -f "$JSON_CACHE" ]] || ! printf '%s  %s\n' "$JSON_SHA256" "$JSON_CACHE" 
 fi
 cp "$JSON_CACHE" "$JSON_JAR"
 
-javac -source 8 -target 8 -cp "$JSON_JAR:$ANDROID_JAR:$UNIVERSAL_CLASSES:build/classes" \
+javac -source 8 -target 8 -cp "$JSON_JAR${CP_SEP}$ANDROID_JAR${CP_SEP}$UNIVERSAL_CLASSES${CP_SEP}build/classes" \
     -d "$OUT/classes" \
     tests/com/dsmod/probe/ChatEditorThinkingRegressionTest.java \
     tests/com/dsmod/probe/ChatEditorHistoryImageRegressionTest.java \

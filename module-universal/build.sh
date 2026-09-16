@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 
 source ../scripts/android-tools.sh
 source ../scripts/androidx-path-parser.sh
+source ../scripts/org-json.sh
 RISH_DEX="../third_party/shizuku/rish_shizuku.dex"
 RISH_SHA256="1953c1fd9708904f8fc1f67774843b4cc3d03e5f2a578ff4d654d0625456bc28"
 GOOGLE_PLAY_BUILD="${GOOGLE_PLAY_BUILD:-false}"
@@ -32,6 +33,9 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/generated-src/com/dsmod/probe"
 ANDROIDX_PATH_PARSER_JAR="$(prepare_androidx_path_parser "$OUT")"
+# Compile-time only. android.jar carries no org.json stubs; the device provides
+# the real implementation, so this jar is deliberately left out of the dex step.
+ORG_JSON_JAR="$(prepare_org_json "$OUT")"
 
 echo "[0/7] generate BuildInfo.java"
 MODULE_VER=$(grep -oE 'android:versionName="[^"]+"' AndroidManifest.xml \
@@ -58,14 +62,16 @@ cp ../module/src/com/dsmod/probe/Main.java \
 echo "[1/7] collect open-source core and Xposed adapter"
 find ../module/src/com/dsmod/probe -maxdepth 1 -name '*.java' \
   ! -name Main.java ! -name BuildInfo.java > "$OUT/sources.txt"
+# Local API: OpenAI/Anthropic compatible server, kept as its own package.
+find ../module/src/com/dsmod/probe/localapi -name '*.java' >> "$OUT/sources.txt"
 find ../module/src/com/dsmod/relay -name '*.java' >> "$OUT/sources.txt"
 find ../module-legacy/compat -name '*.java' >> "$OUT/sources.txt"
 find ../module-legacy/src/de -name '*.java' >> "$OUT/sources.txt"
 find "$OUT/generated-src" -name '*.java' >> "$OUT/sources.txt"
 
 echo "[2/7] javac"
-if ! javac -source 8 -target 8 \
-    -cp "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR" \
+if ! javac -source 8 -target 8 -encoding UTF-8 \
+    -cp "$ANDROID_JAR${CP_SEP}$ANDROIDX_PATH_PARSER_JAR${CP_SEP}$ORG_JSON_JAR" \
     -d "$OUT/classes" @"$OUT/sources.txt" 2> "$OUT/javac.err"; then
   cat "$OUT/javac.err"
   exit 1

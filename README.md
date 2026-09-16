@@ -54,10 +54,19 @@ backup and disable the module if the host becomes unstable.
 - [Release notes](https://github.com/lllucccian/Deekseep/releases)
 - [Report a reproducible problem](https://github.com/lllucccian/Deekseep/issues)
 
-This repository contains the complete source for the 1.7.4 Fix Open edition. For
-certain reasons, the Local API is no longer open source and has moved to the
-Closed edition; source code for the Closed edition is not published. All other
-module features are kept in sync between the two free editions.
+This repository contains the complete source for the 1.7.4 Fix Open edition,
+including an independent open-source implementation of the Local API
+(OpenAI- and Anthropic-compatible endpoints served from the DeepSeek process).
+See [docs/LOCAL_API.md](docs/LOCAL_API.md) and
+[docs/LOCAL_API_GAP.md](docs/LOCAL_API_GAP.md).
+
+The upstream project ships a Closed edition whose Local API server is an
+encrypted, dynamically loaded payload. That payload was neither decrypted nor
+copied; the implementation here was written from the public protocol
+specifications and externally observable behaviour. The closed edition's
+runtime attestation and protected-distribution components are intentionally not
+reproduced. All other module features are kept in sync between the two free
+editions.
 
 Licensed under [GPL-3.0-only](LICENSE).
 

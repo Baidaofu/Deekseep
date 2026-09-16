@@ -1,5 +1,8 @@
 package com.dsmod.probe;
 
+import com.dsmod.probe.localapi.ApiContract;
+import com.dsmod.probe.localapi.HostBackend;
+import com.dsmod.probe.localapi.LocalApi;
 import com.dsmod.relay.ExpertRelayGate;
 
 import android.app.Activity;
@@ -239,6 +242,13 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
     private static volatile Object liveQ71;
     private static volatile Object liveFm8;
     private static volatile ClassLoader hostClassLoader;
+    /**
+     * Last completion request object seen on the host's own send path. Kept as a
+     * construction template: cloning it preserves every default the host sets
+     * (experiment flags, locale, client version) that a hand built instance
+     * would silently drop.
+     */
+    private static volatile Object liveRequestTemplate;
     private static volatile Context hostApplicationContext;
     private static volatile String lastInteractiveConversationId;
     private static final Object HEARTBEAT_BINDING_LOCK = new Object();
@@ -846,6 +856,10 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                         UiLanguage.refreshHost(act);
                         if (isDataOptOutEnforced()) requestTrainingOptOut(act, false);
                         maybeInstallAdaptedSettingsEntry(act, cl);
+                        // Local API: reconcile the listener with the user's
+                        // setting. Runs on every resume so a switch flipped in
+                        // the module UI takes effect without restarting the app.
+                        LocalApi.onHostResumed(act);
                         String languageState = "mode=" + UiLanguage.currentMode(act)
                                 + ", host=" + UiLanguage.detectedLanguage(act)
                                 + ", effective=" + (UiLanguage.isChinese(act)
@@ -11731,6 +11745,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                     tlPendingFps.remove();
                     tlPendingModel.remove();
                     if (req != null) {
+                        // Kept as a construction template for Local API traffic.
+                        liveRequestTemplate = req;
                         if (fps != null) ew0Fps.put(req, fps);
                         if (effectiveModel != null) ew0EffectiveModels.put(req, effectiveModel);
                     }
@@ -12121,6 +12137,25 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         if (firstQ || firstTransport) {
             extLog("[VP] captured API managers q71=" + (liveQ71 != null)
                     + " transport=" + (liveR92 != null));
+        }
+        installNativeBackend();
+    }
+
+    /**
+     * Hands the Local API a backend that speaks through the host's own session,
+     * replacing the anonymous fallback. Safe to call on every capture: the
+     * bridge resolves the transport lazily, so a partially initialised host is
+     * not a problem.
+     */
+    private static void installNativeBackend() {
+        try {
+            if (liveR92 == null || liveQ71 == null) {
+                return;
+            }
+            LocalApi.setBackend(new HostBackend(hostApplicationContext, new NativeBridge()));
+            log("local api: native bridge installed");
+        } catch (Throwable t) {
+            log("local api: native bridge install failed: " + safeThrowableMessage(t));
         }
     }
 
@@ -12967,7 +13002,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             bf.setAccessible(true);
             Object i91 = bf.get(r92);
             Method createM = null;
-            for (Method m : i91.getClass().getDeclaredMethods()) {
+            for (Method m : allDeclaredMethods(i91.getClass())) {
                 if (m.getName().equals(HostCompat.method("i91", "a"))
                         && m.getParameterTypes().length == 1) {
                     createM = m;
@@ -12975,8 +13010,23 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                 }
             }
             if (createM == null) {
+                // R8 renames the session owner every build. Fall back to the
+                // structural signature of a Kotlin suspend function: one
+                // continuation parameter, Object result.
+                for (Method m : allDeclaredMethods(i91.getClass())) {
+                    Class<?>[] p = m.getParameterTypes();
+                    if (p.length == 1 && p[0].isInterface() && m.getReturnType() == Object.class) {
+                        createM = m;
+                        break;
+                    }
+                }
+            }
+            if (createM == null) {
                 expertRelaySessionError = "i91.a(create) method missing";
-                extLog("[RELAY] i91.a(create) 未找到");
+                extLog("[RELAY] i91.a(create) 未找到 want=" + HostCompat.method("i91", "a")
+                        + " r92=" + r92.getClass().getName()
+                        + " i91=" + i91.getClass().getName()
+                        + " methods=" + dumpSignatures(i91.getClass()));
                 return null;
             }
             Object res = driveSuspend(cl, createM, i91, new Object[0]);
@@ -12995,6 +13045,53 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                     + "\n" + stackToString(deepestCause(t)));
             return null;
         }
+    }
+
+    /**
+     * Reads the session id out of a raw {@code create session} response body.
+     *
+     * <p>Without this overload the {@code Object} form below recursed into
+     * itself forever, because Java resolves the {@code String} argument to the
+     * only candidate. It surfaced as a StackOverflowError on the first Local
+     * API completion and would have broken the expert relay the same way.
+     */
+    private static String extractSessionId(String body) {
+        if (body == null || body.length() == 0) {
+            return null;
+        }
+        try {
+            JSONObject root = new JSONObject(body);
+            JSONObject data = root.optJSONObject("data");
+            JSONObject biz = data == null ? null : data.optJSONObject("biz_data");
+            String id = firstUsableId(biz != null ? biz : (data != null ? data : root));
+            if (id != null) {
+                return id;
+            }
+        } catch (Throwable ignored) {
+            // A body that is not JSON yields nothing; the caller reports it.
+        }
+        return null;
+    }
+
+    private static String firstUsableId(JSONObject node) {
+        if (node == null) {
+            return null;
+        }
+        String id = node.optString("id", null);
+        if (isUsableSessionId(id)) {
+            return id;
+        }
+        java.util.Iterator<String> keys = node.keys();
+        while (keys.hasNext()) {
+            Object value = node.opt(keys.next());
+            if (value instanceof JSONObject) {
+                String nested = firstUsableId((JSONObject) value);
+                if (nested != null) {
+                    return nested;
+                }
+            }
+        }
+        return null;
     }
 
     private static String extractSessionId(Object response) {
@@ -13272,6 +13369,350 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             sb.append(ch);
         }
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // Local API: native completion transport
+    // ------------------------------------------------------------------
+
+    /**
+     * Runs Local API completions over the host application's own session.
+     *
+     * <p>The request object is cloned from the last one the host actually sent,
+     * so every field the application sets stays intact; only the handful a
+     * completion depends on are overwritten. The answer is read from the same
+     * Flow the chat UI consumes, which makes the traffic indistinguishable from
+     * a normal turn for the server, and keeps the module from reimplementing
+     * signing, PoW framing or experiment flags that change every release.
+     */
+    public static final class NativeBridge implements HostBackend.Bridge {
+
+        public String openSession(String scope, String nativeModel) throws Exception {
+            Main self = MODULE;
+            ClassLoader cl = hostClassLoader;
+            Object r92 = liveR92;
+            Object q71 = liveQ71;
+            if (self == null || cl == null || r92 == null || q71 == null) {
+                throw new IOException("host transport is not captured yet");
+            }
+            String sid = self.createThrowawaySession(cl, r92);
+            if (sid == null) {
+                throw new IOException("native session create failed");
+            }
+            return sid;
+        }
+
+        public ApiContract.CompletionResult generate(ApiContract.CompletionRequest request,
+                String sessionId, ApiContract.DeltaSink sink) throws Exception {
+            Main self = MODULE;
+            ClassLoader cl = hostClassLoader;
+            Object r92 = liveR92;
+            Object q71 = liveQ71;
+            if (self == null || cl == null || r92 == null || q71 == null) {
+                throw new IOException("host transport is not captured yet");
+            }
+            Object pow;
+            try {
+                pow = self.mintCompletionPow(cl, q71);
+            } catch (Throwable t) {
+                throw new IOException("proof of work minting failed: " + safeThrowableMessage(t));
+            }
+            if (!(pow instanceof String) || ((String) pow).length() == 0) {
+                throw new IOException("proof of work minting failed");
+            }
+            String prompt = composePrompt(request);
+            Object nativeRequest;
+            try {
+                nativeRequest = newNativeCompletionRequest(
+                        cl, sessionId, prompt, request.fileIds, request.nativeModel, pow);
+            } catch (Throwable t) {
+                throw new IOException("cannot build a native request: " + safeThrowableMessage(t));
+            }
+            Method send = null;
+            for (Method m : r92.getClass().getDeclaredMethods()) {
+                if ("b".equals(m.getName()) && m.getParameterTypes().length == 2) {
+                    send = m;
+                    break;
+                }
+            }
+            if (send == null) {
+                throw new IOException("host completion entry point not found");
+            }
+            send.setAccessible(true);
+            Object flow = send.invoke(r92, nativeRequest, null);
+            if (flow == null) {
+                throw new IOException("host returned no completion stream");
+            }
+            StringBuilder text = new StringBuilder();
+            StringBuilder reasoning = new StringBuilder();
+            self.collectFlowStreaming(cl, flow, sink, text, reasoning, request.deadlineAtMs);
+            if (text.length() == 0 && reasoning.length() == 0) {
+                throw new IOException("host produced no completion output");
+            }
+            return new ApiContract.CompletionResult(text.toString(), reasoning.toString(), "stop");
+        }
+
+        public void closeSession(String sessionId) throws Exception {
+            Main self = MODULE;
+            ClassLoader cl = hostClassLoader;
+            Object r92 = liveR92;
+            if (self == null || cl == null || r92 == null || sessionId == null) {
+                return;
+            }
+            self.deleteThrowawaySession(cl, r92, sessionId);
+        }
+    }
+
+    /** System prompt and transcript share one field on the native request. */
+    private static String composePrompt(ApiContract.CompletionRequest request) {
+        String system = request.systemPrompt;
+        if (system == null || system.trim().length() == 0) {
+            return request.prompt;
+        }
+        return system + "\n\n" + request.prompt;
+    }
+
+    private static Object newNativeCompletionRequest(ClassLoader cl, String sessionId,
+            String prompt, List<String> fileIds, String modelType, Object pow) throws Throwable {
+        Class<?> type = HostCompat.load(cl, "qw0");
+        Object request = null;
+        Object template = liveRequestTemplate;
+        Main self = MODULE;
+        if (template != null && type.isInstance(template) && self != null) {
+            request = self.shallowCloneEw0(template);
+        }
+        if (request == null) {
+            request = allocateByConstructor(type);
+        }
+        if (request == null) {
+            throw new IOException("cannot build a native completion request");
+        }
+        setFieldByName(request, "a", sessionId);
+        setFieldByName(request, "b", null);
+        setFieldByName(request, "c", prompt);
+        setFieldByName(request, "d", fileIds == null
+                ? new ArrayList() : new ArrayList(fileIds));
+        setFieldByName(request, "e", Boolean.FALSE);
+        setFieldByName(request, "f", Boolean.FALSE);
+        setFieldByName(request, "i", modelType == null ? "default" : modelType);
+        setFieldByName(request, "k", pow);
+        return request;
+    }
+
+    /**
+     * Builds an instance when no request template has been captured yet.
+     *
+     * <p>Kotlin constructors start with {@code checkNotNullParameter}, so plain
+     * nulls are rejected outright. Every constructor is tried, smallest first,
+     * with empty instead of null arguments; the first one that survives wins.
+     */
+    private static Object allocateByConstructor(Class<?> type) {
+        Constructor<?>[] all = type.getDeclaredConstructors();
+        java.util.List<Constructor<?>> ordered = new ArrayList<Constructor<?>>();
+        for (Constructor<?> ctor : all) {
+            ordered.add(ctor);
+        }
+        java.util.Collections.sort(ordered, new java.util.Comparator<Constructor<?>>() {
+            public int compare(Constructor<?> a, Constructor<?> b) {
+                return a.getParameterTypes().length - b.getParameterTypes().length;
+            }
+        });
+        for (Constructor<?> ctor : ordered) {
+            try {
+                ctor.setAccessible(true);
+                Class<?>[] params = ctor.getParameterTypes();
+                Object[] args = new Object[params.length];
+                for (int i = 0; i < params.length; i++) {
+                    args[i] = defaultArgument(params[i]);
+                }
+                Object created = ctor.newInstance(args);
+                if (created != null) {
+                    extLog("[API] built request via " + ctor.getParameterTypes().length
+                            + "-arg constructor");
+                    return created;
+                }
+            } catch (Throwable t) {
+                Throwable cause = t.getCause() != null ? t.getCause() : t;
+                extLog("[API] constructor/" + ctor.getParameterTypes().length
+                        + " rejected: " + cause);
+            }
+        }
+        extLog("[API] no constructor worked for " + type.getName()
+                + " signatures=" + dumpSignatures(type));
+        return null;
+    }
+
+    /** A value a Kotlin constructor will accept for the given parameter type. */
+    private static Object defaultArgument(Class<?> type) {
+        if (type == boolean.class) return Boolean.FALSE;
+        if (type == byte.class) return Byte.valueOf((byte) 0);
+        if (type == short.class) return Short.valueOf((short) 0);
+        if (type == int.class) return Integer.valueOf(0);
+        if (type == long.class) return Long.valueOf(0L);
+        if (type == float.class) return Float.valueOf(0f);
+        if (type == double.class) return Double.valueOf(0d);
+        if (type == char.class) return Character.valueOf((char) 0);
+        if (type == String.class) return "";
+        if (type.isAssignableFrom(String.class)) return "";
+        if (type == java.util.List.class || type == java.util.Collection.class) {
+            return new ArrayList();
+        }
+        if (type == java.util.Map.class) return new java.util.HashMap();
+        if (type == java.util.Set.class) return new java.util.HashSet();
+        return null;
+    }
+
+    /**
+     * Drives a host Flow and forwards deltas as they arrive.
+     *
+     * <p>Same shape as {@link #collectFlow}: the collector and continuation are
+     * proxies because their types are renamed on every build. Cancellation and
+     * the caller's deadline both stop the wait.
+     */
+    private void collectFlowStreaming(ClassLoader cl, Object flow, ApiContract.DeltaSink sink,
+            StringBuilder text, StringBuilder reasoning, long deadlineAtMs) {
+        try {
+            Method collectM = null;
+            for (Class<?> itf : allInterfaces(flow.getClass())) {
+                Method cand = null;
+                int two = 0;
+                for (Method m : itf.getDeclaredMethods()) {
+                    if (m.getParameterTypes().length == 2) {
+                        cand = m;
+                        two++;
+                    }
+                }
+                if (two == 1 && cand.getParameterTypes()[1].isInterface()) {
+                    collectM = cand;
+                    break;
+                }
+            }
+            if (collectM == null) {
+                extLog("[API] flow collector not found");
+                return;
+            }
+            final Class<?> collectorCls = collectM.getParameterTypes()[0];
+            final Class<?> contCls = collectM.getParameterTypes()[1];
+            Class<?> ccTmp = null;
+            for (Method m : contCls.getMethods()) {
+                if (m.getParameterTypes().length == 0 && m.getReturnType().isInterface()) {
+                    ccTmp = m.getReturnType();
+                    break;
+                }
+            }
+            final Class<?> ccCls = ccTmp;
+            final Object ctx = (ccCls != null) ? emptyContextProxy(cl, ccCls) : null;
+            final CountDownLatch latch = new CountDownLatch(1);
+            final int[] count = {0};
+            final boolean[] stopped = {false};
+
+            InvocationHandler contH = new InvocationHandler() {
+                public Object invoke(Object proxy, Method m, Object[] a) {
+                    if (isObjectMethod(m)) return objectMethod(proxy, m, a);
+                    if (m.getParameterTypes().length == 0) return ctx;
+                    latch.countDown();
+                    return null;
+                }
+            };
+            final Object rootCont = Proxy.newProxyInstance(cl, new Class<?>[]{contCls}, contH);
+
+            InvocationHandler collH = new InvocationHandler() {
+                public Object invoke(Object proxy, Method m, Object[] a) {
+                    if (isObjectMethod(m)) return objectMethod(proxy, m, a);
+                    if (m.getParameterTypes().length != 2) return null;
+                    try {
+                        Object value = a[0];
+                        count[0]++;
+                        if (!stopped[0]) {
+                            emitNativeEvent(value, sink, text, reasoning);
+                        }
+                        if (sink.isCancelled()) {
+                            stopped[0] = true;
+                            latch.countDown();
+                        }
+                    } catch (Throwable t) {
+                        extLog("[API] emit err " + t);
+                    }
+                    return null;
+                }
+            };
+            Object collector = Proxy.newProxyInstance(cl, new Class<?>[]{collectorCls}, collH);
+            collectM.setAccessible(true);
+            try {
+                collectM.invoke(flow, collector, rootCont);
+            } catch (java.lang.reflect.InvocationTargetException ite) {
+                Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
+                extLog("[API] collect threw: " + cause);
+            }
+            long waitMs = deadlineAtMs <= 0
+                    ? 120_000L : Math.max(1_000L, deadlineAtMs - System.currentTimeMillis());
+            latch.await(waitMs, TimeUnit.MILLISECONDS);
+            extLog("[API] native completion events=" + count[0]
+                    + " text=" + text.length() + " reasoning=" + reasoning.length());
+        } catch (Throwable t) {
+            extLog("[API] collectFlowStreaming failed: " + t + "\n" + stackToString(t));
+        }
+    }
+
+    /** Routes one host stream event onto the reasoning or the answer channel. */
+    private void emitNativeEvent(Object value, ApiContract.DeltaSink sink,
+            StringBuilder text, StringBuilder reasoning) throws Exception {
+        Object event = fieldByName(value, "a");
+        if (event == null || fieldByName(event, "j") instanceof String) {
+            return;
+        }
+        if (fieldByName(event, "a") != null) {
+            return;
+        }
+        Object body = fieldByName(event, "b");
+        if (!(body instanceof String)) {
+            return;
+        }
+        String json = (String) body;
+        String delta = extractContentDelta(json);
+        if (delta == null || delta.length() == 0) {
+            return;
+        }
+        if (isReasoningPayload(json)) {
+            reasoning.append(delta);
+            sink.onReasoning(delta);
+        } else {
+            text.append(delta);
+            sink.onText(delta);
+        }
+    }
+
+    /** Declared methods of a class and every superclass, nearest first. */
+    private static List<Method> allDeclaredMethods(Class<?> type) {
+        List<Method> out = new ArrayList<Method>();
+        for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                for (Method m : c.getDeclaredMethods()) {
+                    out.add(m);
+                }
+            } catch (Throwable ignored) {
+                // A class that cannot be introspected contributes nothing.
+            }
+        }
+        return out;
+    }
+
+    /** Compact signature dump used when a reflective lookup misses. */
+    private static String dumpSignatures(Class<?> type) {
+        StringBuilder sb = new StringBuilder();
+        for (Method m : allDeclaredMethods(type)) {
+            if (sb.length() > 0) {
+                sb.append(" | ");
+            }
+            sb.append(m.getName()).append('/').append(m.getParameterTypes().length)
+                    .append("->").append(m.getReturnType().getSimpleName());
+        }
+        return sb.toString();
+    }
+
+    private static boolean isReasoningPayload(String json) {
+        return json.contains("thinking") || json.contains("reasoning")
+                || json.contains("thought");
     }
 
     private static String stackToString(Throwable t) {

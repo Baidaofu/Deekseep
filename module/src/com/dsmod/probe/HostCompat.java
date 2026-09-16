@@ -13,7 +13,7 @@ import java.lang.reflect.Modifier;
  * Keeping the legacy path as an identity mapping is intentional: one module APK therefore works
  * with both host families.</p>
  */
-final class HostCompat {
+public final class HostCompat {
     private static volatile boolean initialized;
     private static volatile boolean v230;
     private static volatile boolean v234;
@@ -88,19 +88,19 @@ final class HostCompat {
                 || "2.3.4".equals(value) || "2.3.6".equals(value);
     }
 
-    static String localApiAuthInterceptorClass() {
+    public static String localApiAuthInterceptorClass() {
         if (v236) return "se0";
         if (v234) return googlePlay ? "eg0" : "se0";
         return v230 ? "td0" : "id0";
     }
 
-    static String localApiHeaderBuilderClass() {
+    public static String localApiHeaderBuilderClass() {
         if (v236) return "lq3";
         if (v234) return googlePlay ? "gs3" : "cq3";
         return v230 ? "tm3" : "jk3";
     }
 
-    static String localApiHeaderSetterMethod() {
+    public static String localApiHeaderSetterMethod() {
         return v230 && !v234 ? "k0" : "l0";
     }
 
@@ -755,19 +755,19 @@ final class HostCompat {
     }
 
     /** Suspend endpoint used to create the hidden session owned by the local API. */
-    static String localApiSessionCreateMethod() {
+    public static String localApiSessionCreateMethod() {
         if (v234) return googlePlay ? "a" : "u";
         return method("i91", "a");
     }
 
     /** Suspend endpoint used to delete one hidden local-API session. */
-    static String localApiSessionDeleteMethod() {
+    public static String localApiSessionDeleteMethod() {
         if (v234) return googlePlay ? "c" : "w";
         return method("i91", "c");
     }
 
     /** Request data class accepted by {@link #localApiSessionDeleteMethod()}. */
-    static String localApiSessionDeleteRequestClass() {
+    public static String localApiSessionDeleteRequestClass() {
         if (v234) return googlePlay ? "of1" : "ud1";
         return name("jb1");
     }

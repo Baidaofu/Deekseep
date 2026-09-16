@@ -70,4 +70,13 @@ D8="${D8:-$(resolve_android_tool d8)}"
 ZIPALIGN="${ZIPALIGN:-$(resolve_android_tool zipalign)}"
 APKSIGNER="${APKSIGNER:-$(resolve_android_tool apksigner)}"
 
-export SDK_ROOT ANDROID_JAR AAPT2 D8 ZIPALIGN APKSIGNER
+# javac/java are native Windows binaries under Git Bash and MSYS2, and they
+# expect ';' between classpath entries. Hardcoding ':' silently drops every
+# entry after the first on those platforms, which surfaces as a flood of
+# "package android.app does not exist" errors.
+CP_SEP=":"
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) CP_SEP=";" ;;
+esac
+
+export SDK_ROOT ANDROID_JAR AAPT2 D8 ZIPALIGN APKSIGNER CP_SEP
