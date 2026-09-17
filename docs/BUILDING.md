@@ -1,8 +1,12 @@
 # Building 1.7.4 Fix from source
 
-The public source edition intentionally excludes the Local API, tunnel
-connectors, and protected-build payloads. It otherwise uses the same 1.7.4 Fix
-feature core for the supported domestic and Google Play DeepSeek packages.
+This fork builds on the 1.7.4 Fix open feature core and **includes the fully
+open-source Local API implementation** under `module/src/com/dsmod/probe/localapi/`
+(see [LOCAL_API.md](LOCAL_API.md)). The public-tunnel connectors remain an
+abstract + validation layer that you wire up yourself, and the closed edition's
+protected-distribution / runtime-attestation payloads are intentionally not
+reproduced. It otherwise uses the same 1.7.4 Fix feature core for the supported
+domestic and Google Play DeepSeek packages.
 
 Requirements: JDK 17, Bash, Android SDK Platform 35 or newer, Android Build
 Tools (`aapt2`, `d8`, `zipalign`, and `apksigner`), `zip`, and `curl`.
