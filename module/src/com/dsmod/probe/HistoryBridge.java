@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -139,7 +140,7 @@ final class HistoryBridge {
         }
 
         List<?> messages = (List<?>) messagesValue;
-        int cleaned = 0;
+        int cleaned = restoreV236AgentToolCards(messages, sid);
         ArrayList<Row> rows = new ArrayList<>();
         for (Object message : messages) {
             if (message == null) continue;
@@ -150,6 +151,100 @@ final class HistoryBridge {
         captureSnapshot(sid, asInteger(field(session, "c")),
                 asInteger(field(session, "d")), asString(field(response, "c")), rows);
         return new Result(cleaned, rows.size());
+    }
+
+    private static int restoreV236AgentToolCards(List<?> messages, String sid) {
+        if (!HostCompat.isV236() || messages == null || messages.isEmpty()) return 0;
+        // A current-build conversation already owns exact per-response carriers. Looking only
+        // at the final response missed earlier cards and appended every side-store trace again
+        // below the model's closing sentence, producing duplicate and over-tall tool panels.
+        int cleaned = 0;
+        boolean hasCarrier = false;
+        LinkedHashSet<String> seenTraceKeys = new LinkedHashSet<>();
+        for (Object message : messages) {
+            long messageInsertedAt = messageInsertedAtMillis(message);
+            Object value = field(message, "t");
+            if (!(value instanceof List)) continue;
+            List fragments = (List) value;
+            for (int fragmentIndex = 0; fragmentIndex < fragments.size(); fragmentIndex++) {
+                Object fragment = fragments.get(fragmentIndex);
+                String content = asString(field(fragment, "c"));
+                if (content == null || !RichPanelRenderer.hasToolLogCarrier(content)) continue;
+                java.util.Set<String> keys = RichPanelRenderer.toolLogTraceKeys(content);
+                long carrierStartedAt = AgentToolTraceStore.earliestStartedAtForKeys(keys);
+                boolean misplaced = messageInsertedAt > 0L && carrierStartedAt > 0L
+                        && messageInsertedAt > carrierStartedAt;
+                boolean duplicate = misplaced
+                        || (!keys.isEmpty() && seenTraceKeys.containsAll(keys));
+                if (duplicate) {
+                    String stripped = RichPanelRenderer.stripToolLogCarriers(content);
+                    if (setField(fragment, "c", stripped)) {
+                        cleaned++;
+                    } else {
+                        Object copy = copyAssistantFragment(fragment, stripped);
+                        if (copy != null) {
+                            try { fragments.set(fragmentIndex, copy); cleaned++; }
+                            catch (Throwable ignored) {}
+                        }
+                    }
+                    continue;
+                }
+                seenTraceKeys.addAll(keys);
+                hasCarrier = true;
+            }
+        }
+        if (hasCarrier) return cleaned;
+        String carrier = AgentToolTraceStore.restoredCarrierForScope(sid);
+        if (carrier.length() == 0) return 0;
+        long firstToolStartedAt = AgentToolTraceStore.earliestFinishedTraceStartedAt(sid);
+        if (firstToolStartedAt <= 0L) return 0;
+        for (int messageIndex = messages.size() - 1; messageIndex >= 0; messageIndex--) {
+            Object message = messages.get(messageIndex);
+            // A tool carrier belongs to the assistant control turn that preceded execution.
+            // Incremental code249 history responses may contain only the later confirmation
+            // (for example "抖音已打开"). Appending the side-store carrier to that newer turn
+            // duplicated the same call below the final answer on every refresh/restart.
+            long insertedMillis = messageInsertedAtMillis(message);
+            if (insertedMillis > firstToolStartedAt) continue;
+            Object value = field(message, "t");
+            if (!(value instanceof List)) continue;
+            List fragments = (List) value;
+            for (int fragmentIndex = fragments.size() - 1; fragmentIndex >= 0; fragmentIndex--) {
+                Object fragment = fragments.get(fragmentIndex);
+                String type = asString(field(fragment, "a"));
+                if (!"RESPONSE".equals(type) && !"TEMPLATE_RESPONSE".equals(type)) continue;
+                String content = asString(field(fragment, "c"));
+                if (content == null || RichPanelRenderer.hasToolLogCarrier(content)) return 0;
+                String restored = content + (content.length() == 0 ? "" : "  \n") + carrier;
+                if (setField(fragment, "c", restored)) return cleaned + 1;
+                Object copy = copyAssistantFragment(fragment, restored);
+                if (copy == null) return 0;
+                try {
+                    fragments.set(fragmentIndex, copy);
+                    return cleaned + 1;
+                } catch (Throwable ignored) {
+                    ArrayList<Object> replacement = new ArrayList<Object>(fragments);
+                    replacement.set(fragmentIndex, copy);
+                    return setField(message, "t", replacement) ? cleaned + 1 : cleaned;
+                }
+            }
+        }
+        return cleaned;
+    }
+
+    private static long messageInsertedAtMillis(Object message) {
+        if (message == null || !HostCompat.isV236()) return 0L;
+        try {
+            Method method = HostCompat.publicMessageMethod(message, "O");
+            method.setAccessible(true);
+            Object row = method.invoke(message);
+            double insertedAt = asDouble(field(row, "f"));
+            if (insertedAt <= 0.0d) return 0L;
+            if (insertedAt < 100000000000.0d) insertedAt *= 1000.0d;
+            return (long) insertedAt;
+        } catch (Throwable ignored) {
+            return 0L;
+        }
     }
 
     private static void captureSnapshot(String sid, Integer version, Integer currentMessageId,
@@ -335,7 +430,7 @@ final class HistoryBridge {
                     safe = stripInjectedSystemPrompts(content);
                 } else if ("RESPONSE".equals(type)
                         || "TEMPLATE_RESPONSE".equals(type)) {
-                    safe = HeartbeatToolProtocol.renderConversationToolRows(content);
+                    safe = HeartbeatToolProtocol.sanitizeAssistantHistory(content);
                 } else if ("THINK".equals(type)) {
                     safe = HeartbeatToolProtocol.stripControlBlocks(content);
                 } else {
@@ -368,7 +463,7 @@ final class HistoryBridge {
                 safe = stripInjectedSystemPrompts(content);
             } else if ("RESPONSE".equals(type)
                     || "TEMPLATE_RESPONSE".equals(type)) {
-                safe = HeartbeatToolProtocol.renderConversationToolRows(content);
+                safe = HeartbeatToolProtocol.sanitizeAssistantHistory(content);
             } else if ("THINK".equals(type)) {
                 safe = HeartbeatToolProtocol.stripControlBlocks(content);
             } else {

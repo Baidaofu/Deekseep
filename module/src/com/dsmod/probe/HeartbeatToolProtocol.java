@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 
 /**
  * Strict hidden control protocol shared by the normal-chat response hook and proactive generation.
@@ -43,13 +44,20 @@ final class HeartbeatToolProtocol {
     static final String TOOL_ASK_USER = "ask_user";
     static final String TOOL_READ_FILE = "read_file";
     static final String TOOL_WRITE_FILE = "write_file";
+    static final String TOOL_DELETE_FILE = "delete_file";
+    static final String TOOL_TRANSFER_FILE = "transfer_file";
     static final String TOOL_NETWORK_REQUEST = "network_request";
+    static final String TOOL_SEARCH_WEB = "search_web";
     static final String TOOL_SHELL = "shell";
     static final String TOOL_DELAY = "delay";
     static final String TOOL_OPEN_APP = "open_app";
+    static final String TOOL_LIST_APPS = "list_apps";
+    static final String TOOL_APP_INFO = "app_info";
+    static final String TOOL_UNINSTALL_APP = "uninstall_app";
     static final String TOOL_SCREEN_POWER = "screen_power";
     static final String TOOL_MUSIC = "music";
     static final String TOOL_RENDER_RICH_PANEL = "render_rich_panel";
+    static final String TOOL_MCP = "mcp";
 
     // Invisible presentation marker consumed by the host Compose text hook. It keeps tool status
     // styling separate from model-authored Markdown and remains visually harmless if a future
@@ -71,7 +79,7 @@ final class HeartbeatToolProtocol {
      * not just a prompt preference: it is the protocol-level guard that makes execution order,
      * result delivery and side-effect deduplication deterministic.
      */
-    private static final int MAX_CALLS_PER_RESPONSE = 1;
+    private static final int MAX_CALLS_PER_RESPONSE = 4;
     private static final int MAX_INSTRUCTION = 1200;
     private static final int MAX_PATH = 1024;
     private static final int MAX_FILE_CONTENT = 32 * 1024;
@@ -93,6 +101,21 @@ final class HeartbeatToolProtocol {
             new ArrayList<>();
     private static final LinkedHashMap<String, Long> TRACKED_CALL_TIMES =
             new LinkedHashMap<>();
+    private static final String[] TOOL_NAMES = new String[]{
+            TOOL_SCHEDULE_ONCE, TOOL_SET_PLAN, TOOL_CLEAR_PLAN,
+            TOOL_SET_INTERVAL, TOOL_BIND_CHAT, TOOL_CANCEL_HEARTBEAT,
+            TOOL_GET_CURRENT_TIME, TOOL_CAPTURE_SCREEN, TOOL_TAP_SCREEN,
+            TOOL_SWIPE_SCREEN, TOOL_PRESS_BACK, TOOL_ASK_USER,
+            TOOL_READ_FILE, TOOL_WRITE_FILE, TOOL_NETWORK_REQUEST,
+            TOOL_SEARCH_WEB,
+            TOOL_SHELL, TOOL_DELAY, TOOL_OPEN_APP, TOOL_LIST_APPS, TOOL_APP_INFO,
+            TOOL_UNINSTALL_APP, TOOL_SCREEN_POWER,
+            TOOL_MUSIC, TOOL_RENDER_RICH_PANEL
+    };
+    private static final Pattern THINKING_CALL_PREFIX = Pattern.compile(
+            "(?iu)^(?:调用|工具调用|call|tool\\s*call)\\s*\\d*\\s*[:：].*$");
+    private static final Pattern THINKING_NUMBERED_PREFIX = Pattern.compile(
+            "(?iu)^\\d{1,2}\\s*[.)、:]\\s*[a-z_][a-z0-9_]{2,40}\\s*[:：({].*$");
 
     private HeartbeatToolProtocol() {}
 
@@ -240,6 +263,109 @@ final class HeartbeatToolProtocol {
         return parseInternal(value, true);
     }
 
+    /**
+     * Final screen privacy boundary used immediately before DeepSeek creates its Markdown AST.
+     * This is intentionally stateless: every streamed frame is sanitized on its own, so a prior
+     * call, cached Compose state, or a recycled message row cannot disable later calls.
+     */
+    static String sanitizeAtRenderBoundary(String value) {
+        if (value == null || value.length() == 0) return value;
+        // A cold history render can reach BasicText before the repository bridge has replaced
+        // the persisted REQUEST fragment.  Always render the post-wrapper body, including for
+        // an ordinary user message.  HistoryBridge only accepts the module's exact byte-zero
+        // wrapper, so user-authored XML or indented examples remain untouched.
+        String visibleBody = HistoryBridge.stripInjectedSystemPrompts(value);
+        String transportBody = visibleBody.trim();
+        if (isCompletePrivateTransportBody(transportBody)) return "";
+        // Do not add a marker fast-path here.  During SSE streaming the renderer can receive
+        // prefixes such as "[[DEE" or "\\[\\[DEEKSEEP\\_"; parseInternal deliberately removes
+        // every valid partial opening marker before it reaches the native Markdown parser.
+        String rendered = parseForConversation(visibleBody).visibleText;
+        // Older builds emitted an optional array-row spacing suffix that this host's
+        // JLaTeXMath parser prints literally. Keep history clean while new batches use a
+        // single inline graphics node and no array syntax at all.
+        rendered = rendered.replace("\\\\[-0.10em]", "\\\\");
+        return rendered.replace("[-0.10em]", "");
+    }
+
+    /**
+     * Removes model-internal tool planning from a THINK fragment.
+     *
+     * <p>DeepSeek 2.3.4 streams reasoning and the final answer through different fragment
+     * classes. The private V1 envelope normally lives in RESPONSE, but the model can echo the
+     * call JSON in THINK first (for example, {@code 调用1: get_current_time}). Filtering only the
+     * response therefore leaves the exact tool names, ids and arguments visible. This method is
+     * deliberately conservative: ordinary prose that merely mentions a tool remains visible;
+     * truncation starts only at a line shaped like an actual invocation or containing a known
+     * tool JSON identity field.</p>
+     */
+    static String sanitizeThinkingToolNarration(String value) {
+        if (value == null || value.length() == 0) return value;
+        String privateSafe = sanitizeAtRenderBoundary(value);
+        int boundary = firstThinkingInvocationLine(privateSafe);
+        if (boundary < 0) return privateSafe;
+        return privateSafe.substring(0, boundary);
+    }
+
+    private static int firstThinkingInvocationLine(String value) {
+        int cursor = 0;
+        while (cursor < value.length()) {
+            int newline = value.indexOf('\n', cursor);
+            int end = newline < 0 ? value.length() : newline;
+            String line = value.substring(cursor, end).trim();
+            if (isThinkingInvocationLine(line)) return cursor;
+            if (newline < 0) break;
+            cursor = newline + 1;
+        }
+        return -1;
+    }
+
+    private static boolean isThinkingInvocationLine(String line) {
+        if (line == null || line.length() == 0) return false;
+        String lower = line.toLowerCase(Locale.US);
+        boolean knownTool = containsKnownToolName(lower);
+        if (!knownTool) return false;
+        if (THINKING_CALL_PREFIX.matcher(line).matches()
+                || THINKING_NUMBERED_PREFIX.matcher(line).matches()) return true;
+        int toolField = lower.indexOf("\"tool\"");
+        if (toolField >= 0 && lower.indexOf(':', toolField + 6) >= 0) return true;
+        if ((lower.startsWith("{\"call\"")
+                || lower.startsWith("{\"calls\"")
+                || lower.startsWith("[{\"id\""))) return true;
+        return false;
+    }
+
+    private static boolean containsKnownToolName(String lower) {
+        if (lower == null || lower.length() == 0) return false;
+        if (lower.indexOf(AgentMcpManager.TOOL_PREFIX) >= 0) return true;
+        for (String tool : TOOL_NAMES) {
+            if (lower.indexOf(tool) >= 0) return true;
+        }
+        return AgentDeviceBridge.workspaceSupportedV241()
+                && (lower.indexOf(TOOL_DELETE_FILE) >= 0
+                || lower.indexOf(TOOL_TRANSFER_FILE) >= 0);
+
+    }
+
+    static boolean hasPartialPrivateOpening(String value) {
+        if (value == null || value.length() == 0) return false;
+        String normalized = normalizeMarkdownEscapedControlMarker(value);
+        if (normalized.indexOf(CONTROL_START) >= 0
+                || normalized.indexOf(EVENT_START) >= 0
+                || normalized.indexOf(RESULT_START) >= 0) return true;
+        String[] markers = new String[]{CONTROL_START, EVENT_START, RESULT_START,
+                "DEEKSEEP_LOCAL_TOOLS_V1]]"};
+        for (String marker : markers) {
+            int maximum = Math.min(normalized.length(), marker.length() - 1);
+            int minimum = marker.charAt(0) == 'D' ? 8 : 2;
+            for (int length = maximum; length >= minimum; length--) {
+                if (normalized.regionMatches(normalized.length() - length,
+                        marker, 0, length)) return true;
+            }
+        }
+        return false;
+    }
+
     private static Result parseInternal(String value, boolean renderToolRows) {
         if (value == null || value.length() == 0) {
             return new Result(value, Collections.<ToolCall>emptyList(),
@@ -324,7 +450,31 @@ final class HeartbeatToolProtocol {
         source = source
                 .replace("\\[\\[" + identifier + "\\]\\]", CONTROL_START)
                 .replace("\\[\\[/" + identifier + "\\]\\]", CONTROL_END);
-        return source;
+        // 2.3.4's Compose State can publish our sanitized empty prefix back through the same
+        // StateFlow before the next JSON-Patch delta. In that race the leading "[[" is consumed
+        // while the stable protocol identifier and complete closing marker survive. Repair only
+        // this exact high-entropy orphaned header; arbitrary JSON and natural text stay inert.
+        String orphan = identifier + "]]";
+        StringBuilder repaired = null;
+        int cursor = 0;
+        while (true) {
+            int at = source.indexOf(orphan, cursor);
+            if (at < 0) break;
+            boolean alreadyFramed = at >= 2 && source.charAt(at - 2) == '['
+                    && source.charAt(at - 1) == '[';
+            if (!alreadyFramed && at >= 3) {
+                alreadyFramed = source.charAt(at - 3) == '['
+                        && source.charAt(at - 2) == '['
+                        && source.charAt(at - 1) == '/';
+            }
+            if (!alreadyFramed) {
+                if (repaired == null) repaired = new StringBuilder(source);
+                int shifted = at + (repaired.length() - source.length());
+                repaired.insert(shifted, "[[");
+            }
+            cursor = at + orphan.length();
+        }
+        return repaired == null ? source : repaired.toString();
     }
 
     /** Accepts a JSON fence only inside an already authenticated control block. */
@@ -378,37 +528,38 @@ final class HeartbeatToolProtocol {
         return stripToolStatusStyleMarkers(parse(value).visibleText);
     }
 
+    /** History contains model prose only; local graphics carriers are re-created for live UI. */
+    static String sanitizeAssistantHistory(String value) {
+        String clean = stripControlBlocks(value);
+        // code249 persists its exact local display carrier. The trace payload is bounded and
+        // contains no control block; keeping it lets a cold conversation restore rebuild the
+        // same clickable invocation row instead of silently deleting it.
+        if (HostCompat.isV236()) return clean;
+        return RichPanelRenderer.stripToolLogCarriers(clean);
+    }
+
     static String renderConversationToolRows(String value) {
         Result parsed = parseForConversation(value);
         if (AgentToolConfig.hideToolLogs()) return parsed.visibleText;
+        // A restored row from an older build already owns its visual carrier. Rendering it again
+        // must be a no-op or every cold conversation open creates another pending-looking row.
+        if (RichPanelRenderer.hasToolLogCarrier(value)) return parsed.visibleText;
         if (!parsed.incompleteControlBlock) {
-            if (!AgentToolConfig.enabledFast()
-                    || !parsed.calls.isEmpty() || !parsed.rejectedCalls.isEmpty()
-                    || !looksLikeUnbackedToolClaim(value)) {
-                return parsed.visibleText;
-            }
-            StringBuilder visible = new StringBuilder(parsed.visibleText);
-            appendParagraphBreak(visible);
-            boolean chinese = Locale.getDefault().getLanguage()
-                    .toLowerCase(Locale.US).startsWith("zh");
-            String status = chinese
-                    ? "未检测到完整工具调用，操作未执行"
-                    : "No complete tool call detected; action was not run";
-            visible.append("> ").append(markToolStatus(
-                    statusClock(System.currentTimeMillis()) + "  " + status));
-            visible.append("\n\n");
-            return visible.toString();
+            // Do not infer a call from phrases such as “已经打开抖音”. On restored history the
+            // control envelope is deliberately absent, and inference used to produce false
+            // waiting cards even though no execution was scheduled in this process.
+            return parsed.visibleText;
         }
         StringBuilder visible = new StringBuilder(parsed.visibleText);
-        appendParagraphBreak(visible);
+        appendToolLogBreak(visible);
         boolean chinese = Locale.getDefault().getLanguage()
                 .toLowerCase(Locale.US).startsWith("zh");
         String status = chinese
                 ? "工具调用不完整，未执行（回复可能中断）"
                 : "Incomplete tool call; not run (response may have been interrupted)";
-        visible.append("> ").append(markToolStatus(
-                statusClock(System.currentTimeMillis()) + "  " + status));
-        visible.append("\n\n");
+        appendGraphicalToolRow(visible,
+                statusClock(System.currentTimeMillis()) + "  " + status);
+        visible.append('\n');
         return visible.toString();
     }
 
@@ -444,23 +595,41 @@ final class HeartbeatToolProtocol {
             }
         }
         if (hideStatus && !hasPanel) return;
-        appendParagraphBreak(visible);
+        appendToolLogBreak(visible);
         boolean chinese = Locale.getDefault().getLanguage().toLowerCase(Locale.US)
                 .startsWith("zh");
+        ArrayList<RichPanelRenderer.ToolLogRow> statuses = new ArrayList<>();
+        ArrayList<ToolCall> searches = new ArrayList<>();
         for (int index = firstCall; index < calls.size(); index++) {
             ToolCall call = calls.get(index);
             if (!hideStatus) {
-                if (index > firstCall) visible.append('\n');
-                visible.append("> ")
-                        .append(markToolStatus(toolStatusText(call, chinese)));
+                if (TOOL_SEARCH_WEB.equals(call.tool)) searches.add(call);
+                else statuses.add(toolLogRow(call, chinese));
             }
+        }
+        if (!statuses.isEmpty()) appendNativeToolLogRows(visible, statuses);
+        if (!searches.isEmpty()) {
+            // DeepSeek's native Markdown renderer only gives a standalone paragraph its own
+            // Text composable. Keep search out of the preceding assistant prose/tool canvas so
+            // Main.renderNativeAgentSearch can replace this exact node with fh0.c, the host's
+            // real searching/results component.
+            appendParagraphBreak(visible);
+            String query = cleanLine(searches.get(0).instruction, 80);
+            String label = chinese
+                    ? (query.length() == 0 ? "正在搜索" : "正在搜索 · " + query)
+                    : (query.length() == 0 ? "Searching" : "Searching · " + query);
+            Main.registerNativeSearchCalls(searches, label);
+            visible.append(markToolStatus(label));
+        }
+        for (int index = firstCall; index < calls.size(); index++) {
+            ToolCall call = calls.get(index);
             if (TOOL_RENDER_RICH_PANEL.equals(call.tool)
                     && RichPanelRenderer.isRenderedPanel(call.content)) {
-                if (!hideStatus || index > firstCall) visible.append("\n\n");
+                visible.append("\n\n");
                 visible.append(call.content);
             }
         }
-        visible.append("\n\n");
+        visible.append('\n');
     }
 
     private static void appendRejectedToolRows(
@@ -468,26 +637,61 @@ final class HeartbeatToolProtocol {
             int firstCall) {
         if (firstCall < 0 || firstCall >= rejectedCalls.size()) return;
         if (AgentToolConfig.hideToolLogs()) return;
-        appendParagraphBreak(visible);
+        appendToolLogBreak(visible);
         boolean chinese = Locale.getDefault().getLanguage().toLowerCase(Locale.US)
                 .startsWith("zh");
+        ArrayList<RichPanelRenderer.ToolLogRow> statuses = new ArrayList<>();
         for (int index = firstCall; index < rejectedCalls.size(); index++) {
-            if (index > firstCall) visible.append('\n');
             RejectedCall rejected = rejectedCalls.get(index);
             ToolCall call = rejected == null ? null : rejected.call;
-            String operation = toolOperationLabel(call, chinese);
-            String failure = chinese ? "参数无效，未执行" : "Invalid arguments; not run";
-            visible.append("> ")
-                    .append(markToolStatus(statusClock(
-                            call == null ? System.currentTimeMillis() : call.invokedAt)
-                            + "  " + joinStatus(operation, failure, chinese)));
+            statuses.add(toolLogRow(call, chinese));
         }
-        visible.append("\n\n");
+        appendNativeToolLogRows(visible, statuses);
+        visible.append('\n');
     }
 
     private static String markToolStatus(String value) {
         registerToolStatus(value);
         return TOOL_STATUS_STYLE_MARKER + value + TOOL_STATUS_STYLE_MARKER;
+    }
+
+    /** Render through the host's graphics/formula node so this is a real outlined component. */
+    private static void appendGraphicalToolRow(StringBuilder visible, String value) {
+        String safe = value == null ? "" : value.replace('\r', ' ').replace('\n', ' ');
+        registerToolStatus(safe);
+        visible.append(RichPanelRenderer.renderToolLog(safe));
+    }
+
+    private static void appendNativeToolLogRows(
+            StringBuilder visible, List<RichPanelRenderer.ToolLogRow> values) {
+        if (values == null || values.isEmpty()) return;
+        ArrayList<RichPanelRenderer.ToolLogRow> safeValues = new ArrayList<>();
+        for (RichPanelRenderer.ToolLogRow value : values) {
+            if (value == null) continue;
+            String name = value.name.replace('\r', ' ').replace('\n', ' ').trim();
+            String detail = value.detail.replace('\r', ' ').replace('\n', ' ').trim();
+            if (name.length() == 0) continue;
+            safeValues.add(new RichPanelRenderer.ToolLogRow(
+                    name, detail, value.traceKey, value.input));
+            registerToolStatus(name);
+        }
+        if (!safeValues.isEmpty()) {
+            // Render as one native Markdown formula node. DeepSeek's bundled JLaTeXMath canvas
+            // draws the outline and compact rows itself, so Markdown cannot flatten this back
+            // into ordinary body text and adjacent calls do not gain paragraph-sized gaps.
+            visible.append(RichPanelRenderer.renderToolLogRows(safeValues));
+        }
+    }
+
+    private static RichPanelRenderer.ToolLogRow toolLogRow(
+            ToolCall call, boolean chinese) {
+        String visible = detailedToolStatusText(call, chinese);
+        int detailAt = visible.indexOf('\n');
+        String name = detailAt < 0 ? visible : visible.substring(0, detailAt);
+        String detail = detailAt < 0 ? "" : visible.substring(detailAt + 1);
+        return new RichPanelRenderer.ToolLogRow(
+                name, detail, AgentToolTraceStore.key(call),
+                AgentToolTraceStore.inputJson(call));
     }
 
     private static void registerToolStatus(String value) {
@@ -524,37 +728,6 @@ final class HeartbeatToolProtocol {
 
     static boolean isRegisteredToolStatusText(String value) {
         if (value == null || value.length() == 0) return false;
-        if (!hasToolStatusStyleMarker(value)
-                && value.indexOf("\u5fc3\u8df3") < 0
-                && value.indexOf("heartbeat") < 0
-                && value.indexOf("Heartbeat") < 0
-                && value.indexOf("\u5f53\u524d\u65f6\u95f4") < 0
-                && value.indexOf("Current time") < 0
-                && value.indexOf("\u622a\u56fe") < 0
-                && value.indexOf("screen") < 0
-                && value.indexOf("\u70b9\u51fb") < 0
-                && value.indexOf("Tap") < 0
-                && value.indexOf("\u6ed1\u52a8") < 0
-                && value.indexOf("Swipe") < 0
-                && value.indexOf("\u8fd4\u56de") < 0
-                && value.indexOf("Back") < 0
-                && value.indexOf("\u8be2\u95ee\u7528\u6237") < 0
-                && value.indexOf("Ask user") < 0
-                && value.indexOf("\u8bfb\u53d6\u6587\u4ef6") < 0
-                && value.indexOf("Read file") < 0
-                && value.indexOf("\u5199\u5165\u6587\u4ef6") < 0
-                && value.indexOf("Write file") < 0
-                && value.indexOf("\u8ffd\u52a0\u6587\u4ef6") < 0
-                && value.indexOf("Append file") < 0
-                && value.indexOf("\u7f51\u7edc\u8bf7\u6c42") < 0
-                && value.indexOf("Network request") < 0
-                && value.indexOf("Shell") < 0
-                && value.indexOf("\u5bcc\u9762\u677f") < 0
-                && value.indexOf("Rich panel") < 0
-                && value.indexOf("\u5bcc\u89c6\u89c9") < 0
-                && value.indexOf("Rich visual") < 0) {
-            return false;
-        }
         String clean = stripToolStatusStyleMarkers(value);
         int start = 0;
         boolean found = false;
@@ -587,6 +760,16 @@ final class HeartbeatToolProtocol {
         }
         if (trailingNewlines == 0) value.append("\n\n");
         else if (trailingNewlines == 1) value.append('\n');
+    }
+
+    /** A tool trace follows assistant prose closely; an empty paragraph doubles the visual gap. */
+    private static void appendToolLogBreak(StringBuilder value) {
+        int end = value.length();
+        while (end > 0 && value.charAt(end - 1) == '\n') end--;
+        if (end < value.length()) value.delete(end, value.length());
+        // CommonMark hard break: stays in the same compact paragraph but guarantees the inline
+        // graphics node starts at the assistant text column instead of following the last word.
+        if (value.length() > 0) value.append("  \n");
     }
 
     private static String toolOperationLabel(ToolCall call, boolean chinese) {
@@ -631,8 +814,17 @@ final class HeartbeatToolProtocol {
         if (TOOL_WRITE_FILE.equals(call.tool)) {
             return chinese ? "写入文件" : "Write file";
         }
+        if (TOOL_DELETE_FILE.equals(call.tool)) {
+            return chinese ? "删除文件" : "Delete file";
+        }
+        if (TOOL_TRANSFER_FILE.equals(call.tool)) {
+            return chinese ? "传输文件" : "Transfer file";
+        }
         if (TOOL_NETWORK_REQUEST.equals(call.tool)) {
             return chinese ? "网络请求" : "Network request";
+        }
+        if (TOOL_SEARCH_WEB.equals(call.tool)) {
+            return chinese ? "正在搜索" : "Searching";
         }
         if (TOOL_SHELL.equals(call.tool)) return "Shell";
         if (TOOL_DELAY.equals(call.tool)) {
@@ -641,6 +833,9 @@ final class HeartbeatToolProtocol {
         if (TOOL_OPEN_APP.equals(call.tool)) {
             return chinese ? "打开应用" : "Open app";
         }
+        if (TOOL_LIST_APPS.equals(call.tool)) return chinese ? "应用列表" : "List apps";
+        if (TOOL_APP_INFO.equals(call.tool)) return chinese ? "应用详情" : "App info";
+        if (TOOL_UNINSTALL_APP.equals(call.tool)) return chinese ? "卸载应用" : "Uninstall app";
         if (TOOL_SCREEN_POWER.equals(call.tool)) {
             return chinese ? "屏幕电源" : "Screen power";
         }
@@ -649,6 +844,9 @@ final class HeartbeatToolProtocol {
         }
         if (TOOL_RENDER_RICH_PANEL.equals(call.tool)) {
             return chinese ? "生成富视觉" : "Render rich visual";
+        }
+        if (AgentMcpManager.isDynamicTool(call.tool)) {
+            return AgentMcpManager.displayName(call.tool);
         }
         return chinese ? "工具调用" : "Tool call";
     }
@@ -684,9 +882,9 @@ final class HeartbeatToolProtocol {
                     chinese ? "\u53d6\u6d88\u5fc3\u8df3" : "Cancel heartbeat",
                     cancelDetail(call, chinese), chinese);
         } else if (TOOL_GET_CURRENT_TIME.equals(call.tool)) {
-            status = joinStatus(
-                    chinese ? "\u83b7\u53d6\u5f53\u524d\u65f6\u95f4" : "Get current time",
-                    fullStatusTime(call.invokedAt), chinese);
+            // markToolStatus already adds the one display timestamp.  Including invokedAt here
+            // produced a second, meaningless timestamp at the bottom of the activity log.
+            status = chinese ? "\u83b7\u53d6\u5f53\u524d\u65f6\u95f4" : "Get current time";
         } else if (TOOL_CAPTURE_SCREEN.equals(call.tool)) {
             status = chinese ? "\u83b7\u53d6\u622a\u56fe" : "Capture screen";
         } else if (TOOL_TAP_SCREEN.equals(call.tool)) {
@@ -718,10 +916,19 @@ final class HeartbeatToolProtocol {
                             : "\u5199\u5165\u6587\u4ef6")
                             : (call.append ? "Append file" : "Write file"),
                     compactPath(call.path), chinese);
+        } else if (TOOL_DELETE_FILE.equals(call.tool)) {
+            status = joinStatus(chinese ? "删除文件" : "Delete file",
+                    compactPath(call.path), chinese);
+        } else if (TOOL_TRANSFER_FILE.equals(call.tool)) {
+            status = joinStatus(chinese ? "复制文件" : "Copy file",
+                    compactPath(call.path) + " → " + compactPath(call.targetId), chinese);
         } else if (TOOL_NETWORK_REQUEST.equals(call.tool)) {
             status = joinStatus(
                     chinese ? "网络请求" : "Network request",
                     call.mode + " " + compactNetworkTarget(call.path), chinese);
+        } else if (TOOL_SEARCH_WEB.equals(call.tool)) {
+            status = joinStatus(chinese ? "正在搜索" : "Searching",
+                    call.instruction, chinese);
         } else if (TOOL_SHELL.equals(call.tool)) {
             String command = call.command.replace('\r', ' ')
                     .replace('\n', ' ').trim();
@@ -735,6 +942,12 @@ final class HeartbeatToolProtocol {
             status = joinStatus(
                     chinese ? "打开应用" : "Open app",
                     call.targetId, chinese);
+        } else if (TOOL_LIST_APPS.equals(call.tool)) {
+            status = chinese ? "读取应用列表" : "Reading app list";
+        } else if (TOOL_APP_INFO.equals(call.tool)) {
+            status = joinStatus(chinese ? "读取应用详情" : "Reading app info", call.targetId, chinese);
+        } else if (TOOL_UNINSTALL_APP.equals(call.tool)) {
+            status = joinStatus(chinese ? "请求卸载确认" : "Request uninstall confirmation", call.targetId, chinese);
         } else if (TOOL_SCREEN_POWER.equals(call.tool)) {
             status = chinese
                     ? ("sleep".equals(call.mode) ? "熄灭屏幕" : "唤醒屏幕")
@@ -750,10 +963,28 @@ final class HeartbeatToolProtocol {
             status = joinStatus(
                     chinese ? "\u751f\u6210\u5bcc\u89c6\u89c9" : "Render rich visual",
                     title, chinese);
+        } else if (AgentMcpManager.isDynamicTool(call.tool)) {
+            status = "MCP · " + AgentMcpManager.displayName(call.tool);
         } else {
             status = chinese ? "\u5fc3\u8df3\u8bbe\u7f6e" : "Heartbeat settings";
         }
         return statusClock(call.invokedAt) + "  " + status;
+    }
+
+    private static String detailedToolStatusText(ToolCall call, boolean chinese) {
+        String name = toolOperationLabel(call, chinese);
+        if (call == null || !TOOL_SHELL.equals(call.tool)) return name;
+        String command = call.command.replace('\r', ' ')
+                .replace('\n', ' ').trim();
+        if (command.length() > 180) command = command.substring(0, 180) + "…";
+        return command.length() == 0 ? name : name + '\n' + command;
+    }
+
+    private static String toolIdentity(ToolCall call) {
+        if (call == null) return "";
+        String id = call.id == null ? "" : call.id.trim();
+        if (id.length() > 10) id = id.substring(0, 10);
+        return "  ·  " + call.tool + (id.length() == 0 ? "" : "  #" + id);
     }
 
     private static String compactPath(String value) {
@@ -886,18 +1117,26 @@ final class HeartbeatToolProtocol {
                 return;
             }
             int count = array.length();
+            String batchScope = "";
             for (int i = 0; i < count; i++) {
                 if (out.size() >= MAX_CALLS_PER_RESPONSE) break;
                 JSONObject call = array.optJSONObject(i);
                 ToolCall parsed = parseCall(call);
                 if (parsed != null) {
+                    if (batchScope.length() == 0) batchScope = parsed.scope;
+                    // One batch has one continuation destination. Never allow a model-produced
+                    // mixed-scope array to route results into another conversation.
+                    if (!batchScope.equals(parsed.scope)) {
+                        RejectedCall rejected = rejectedCall(call);
+                        if (rejected != null) rejectedCalls.add(rejected);
+                        continue;
+                    }
                     out.add(parsed);
-                    return;
+                    continue;
                 }
                 RejectedCall rejected = rejectedCall(call);
                 if (rejected != null) {
                     rejectedCalls.add(rejected);
-                    return;
                 }
             }
         } catch (Throwable ignored) {
@@ -993,7 +1232,8 @@ final class HeartbeatToolProtocol {
     }
 
     private static boolean isSupportedTool(String tool) {
-        return TOOL_SCHEDULE_ONCE.equals(tool)
+        return JavaPluginPlatform.isAgentTool(tool)
+                || AgentMcpManager.isToolEnabled(tool) || TOOL_SCHEDULE_ONCE.equals(tool)
                 || TOOL_SET_PLAN.equals(tool)
                 || TOOL_CLEAR_PLAN.equals(tool)
                 || TOOL_SET_INTERVAL.equals(tool)
@@ -1007,10 +1247,16 @@ final class HeartbeatToolProtocol {
                 || TOOL_ASK_USER.equals(tool)
                 || TOOL_READ_FILE.equals(tool)
                 || TOOL_WRITE_FILE.equals(tool)
+                || (AgentDeviceBridge.workspaceSupportedV241()
+                && (TOOL_DELETE_FILE.equals(tool) || TOOL_TRANSFER_FILE.equals(tool)))
                 || TOOL_NETWORK_REQUEST.equals(tool)
+                || TOOL_SEARCH_WEB.equals(tool)
                 || TOOL_SHELL.equals(tool)
                 || TOOL_DELAY.equals(tool)
                 || TOOL_OPEN_APP.equals(tool)
+                || TOOL_LIST_APPS.equals(tool)
+                || TOOL_APP_INFO.equals(tool)
+                || TOOL_UNINSTALL_APP.equals(tool)
                 || TOOL_SCREEN_POWER.equals(tool)
                 || TOOL_MUSIC.equals(tool)
                 || TOOL_RENDER_RICH_PANEL.equals(tool);
@@ -1018,7 +1264,16 @@ final class HeartbeatToolProtocol {
 
     private static ToolCall parseCall(JSONObject call) {
         if (call == null) return null;
-        String tool = cleanToken(call.optString("tool", ""), 40);
+        // Native DeepSeek historically followed the compact V1 examples and placed built-in
+        // arguments beside id/tool/scope. Recent 2.3.6 and 2.4.1 responses can instead use the
+        // standard function-call shape with an `arguments` object. Adapt those two supported
+        // hosts independently; all other compatibility branches retain the original parser.
+        if (HostCompat.isV236()) {
+            call = normalizeV236BuiltInArguments(call);
+        } else if (HostCompat.isV241()) {
+            call = normalizeV241BuiltInArguments(call);
+        }
+        String tool = cleanToken(call.optString("tool", ""), 120);
         if (!isSupportedTool(tool)) return null;
         String id = cleanId(call.optString("id", ""));
         if (id.length() == 0) {
@@ -1026,6 +1281,16 @@ final class HeartbeatToolProtocol {
         }
         String scope = cleanScope(call.optString("scope", ""));
         if (scope.length() == 0) return null;
+        if (AgentMcpManager.isDynamicTool(tool) || JavaPluginPlatform.isAgentTool(tool)) {
+            JSONObject arguments = call.optJSONObject("arguments");
+            if (arguments == null) arguments = new JSONObject();
+            String raw = arguments.toString();
+            if (raw.length() > MAX_CONTROL_JSON) return null;
+            return new ToolCall(id, tool, scope, "", "", 0, "", "",
+                    -1, -1, -1, -1, 0,
+                    Collections.<Question>emptyList(), "", raw,
+                    false, false, 0L, 0, "", 120000);
+        }
         if (TOOL_SCHEDULE_ONCE.equals(tool)) {
             String at = cleanLine(call.optString("at", ""), 80);
             String instruction = cleanInstruction(call.optString("instruction", ""));
@@ -1154,6 +1419,26 @@ final class HeartbeatToolProtocol {
                     "append".equals(writeMode), createParents,
                     0L, 0, "", 0);
         }
+        if (TOOL_DELETE_FILE.equals(tool)) {
+            if (!AgentDeviceBridge.workspaceSupportedV241()) return null;
+            String path = cleanAbsolutePath(call.optString("path", ""));
+            if (path.length() == 0) return null;
+            return new ToolCall(id, tool, scope, "", "", 0, "", "",
+                    -1, -1, -1, -1, 0,
+                    Collections.<Question>emptyList(), path, "",
+                    false, false, 0L, 0, "", 0);
+        }
+        if (TOOL_TRANSFER_FILE.equals(tool)) {
+            if (!AgentDeviceBridge.workspaceSupportedV241()) return null;
+            String source = cleanAbsolutePath(call.optString("source", ""));
+            String destination = cleanAbsolutePath(call.optString("destination", ""));
+            if (source.length() == 0 || destination.length() == 0
+                    || source.equals(destination)) return null;
+            return new ToolCall(id, tool, scope, "", "", 0, "copy", destination,
+                    -1, -1, -1, -1, 0,
+                    Collections.<Question>emptyList(), source, "",
+                    false, false, 0L, 0, "", 0);
+        }
         if (TOOL_NETWORK_REQUEST.equals(tool)) {
             String url = cleanNetworkUrl(call.optString("url", ""));
             String method = cleanToken(call.optString("method", "GET"), 12)
@@ -1172,6 +1457,11 @@ final class HeartbeatToolProtocol {
                     Collections.<Question>emptyList(), url, body,
                     false, false, 0L, 0, "", timeoutMs);
         }
+        if (TOOL_SEARCH_WEB.equals(tool)) {
+            String query = cleanInstruction(call.optString("query", ""));
+            if (query.length() == 0 || query.length() > 500) return null;
+            return new ToolCall(id, tool, scope, "", query, 0, "", "");
+        }
         if (TOOL_SHELL.equals(tool)) {
             String command = cleanShellCommand(call.optString("command", ""));
             int timeoutMs = call.optInt("timeout_ms", 10000);
@@ -1189,6 +1479,16 @@ final class HeartbeatToolProtocol {
                     -1, -1, -1, -1, (int) requested);
         }
         if (TOOL_OPEN_APP.equals(tool)) {
+            String packageName = cleanPackageName(call.optString("package", ""));
+            if (packageName.length() == 0) return null;
+            return new ToolCall(id, tool, scope, "", "", 0, "", packageName);
+        }
+        if (TOOL_LIST_APPS.equals(tool)) {
+            int limit = call.optInt("limit", 80);
+            if (limit < 1 || limit > 200) return null;
+            return new ToolCall(id, tool, scope, "", "", limit, "", "");
+        }
+        if (TOOL_APP_INFO.equals(tool) || TOOL_UNINSTALL_APP.equals(tool)) {
             String packageName = cleanPackageName(call.optString("package", ""));
             if (packageName.length() == 0) return null;
             return new ToolCall(id, tool, scope, "", "", 0, "", packageName);
@@ -1237,6 +1537,42 @@ final class HeartbeatToolProtocol {
                     false, false, 0L, 0, "", 0);
         }
         return new ToolCall(id, tool, scope, "", "", 0, "", "");
+    }
+
+    private static JSONObject normalizeV236BuiltInArguments(JSONObject call) {
+        return normalizeSupportedBuiltInArguments(call);
+    }
+
+    private static JSONObject normalizeV241BuiltInArguments(JSONObject call) {
+        return normalizeSupportedBuiltInArguments(call);
+    }
+
+    /**
+     * Flattens only a known built-in call's nested argument object. Identity and routing fields
+     * always come from the authenticated outer envelope, and an existing outer argument wins, so
+     * this compatibility adapter cannot redirect a result or override an explicitly supplied
+     * value. Dynamic MCP/Java tools keep their nested arguments byte shape unchanged.
+     */
+    private static JSONObject normalizeSupportedBuiltInArguments(JSONObject call) {
+        if (call == null) return null;
+        String tool = cleanToken(call.optString("tool", ""), 120);
+        if (!isSupportedTool(tool) || AgentMcpManager.isDynamicTool(tool)
+                || JavaPluginPlatform.isAgentTool(tool)) return call;
+        JSONObject arguments = call.optJSONObject("arguments");
+        if (arguments == null || arguments.length() == 0) return call;
+        try {
+            JSONObject normalized = new JSONObject(call.toString());
+            java.util.Iterator<String> keys = arguments.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if ("id".equals(key) || "tool".equals(key) || "scope".equals(key)
+                        || normalized.has(key)) continue;
+                normalized.put(key, arguments.opt(key));
+            }
+            return normalized;
+        } catch (Throwable ignored) {
+            return call;
+        }
     }
 
     private static boolean validScreenCoordinate(int value) {
@@ -1354,12 +1690,20 @@ final class HeartbeatToolProtocol {
                 + "应用内后端使用 DeepSeek 自身权限；用户选择 Root 或 Shizuku 且设为全部允许后，"
                 + "文件、Shell 与界面工具才会使用相应高权限。"
                 + "工具执行结果会通过私有结果事件返回，收到结果前不得假装操作成功。\n"
+                + (HostCompat.isV241() && BuildInfo.PROTECTED_BUILD
+                        && AgentDeviceBridge.workspaceEnabledV241()
+                ? "2.4.1 工作区 Shell 已固定在应用私有的 agent_workspace 目录，启动时会设置 HOME 和 PATH（含 agent_workspace/bin）。"
+                        + "可在该目录内创建项目；install 名称 HTTPS地址只用于下载单文件可执行工具。"
+                        + "Python、Git 等完整包环境不能伪装成单文件安装；先执行 termux-status。未安装时调用 termux-install，从 Termux 官方 GitHub 下载并校验工作区命令环境。"
+                        + "安装成功后直接使用 pkg install -y python git 等命令补齐依赖，不要继续在 Android 基础 PATH 中反复查找。"
+                        + "终端支持 su、rish 以及 rish -c 命令。"
+                        + "下载文件必须是适配当前 Android/CPU 的可执行文件，不要声称已安装而不等待真实结果。\n"
+                : "")
                 + "当前设备本地时间：" + localTime + "。当前周期心跳间隔："
                 + interval + " 分钟。当前对话的心跳约定：" + plan + "。"
                 + "当前对话绑定标识：" + scope + "。\n"
-                + "严格使用单步 Agent 循环：每一轮回复最多只能调用一个工具，"
-                + "必须先等这个工具的真实结果返回，下一轮才能决定是否调用下一个工具。"
-                + "工具调用使用一组完整控制块，一组只能包含一个 call。"
+                + "每轮最多可调用四个彼此独立的工具；有依赖关系时必须先等待前一批真实结果，"
+                + "再决定下一批，不能猜测前一步输出。工具调用只使用一组完整控制块。"
                 + "控制块必须是纯 JSON，不得放进 Markdown 代码块。固定格式：\n"
                 + CONTROL_START + "\n"
                 + "{\"call\":{\"id\":\"唯一短标识\",\"tool\":\"schedule_once\","
@@ -1367,10 +1711,11 @@ final class HeartbeatToolProtocol {
                 + "\"at\":\"YYYY-MM-DDTHH:mm:ss+08:00\","
                 + "\"instruction\":\"届时要做什么\"}}\n"
                 + CONTROL_END + "\n"
-                + "写完一个 call 后必须立刻写结束标记并结束本轮回复。"
-                + "即使任务需要多个工具，本轮也禁止输出第二个控制块；"
-                + "收到第一个工具的私有结果后，再在下一轮调用第二个。"
-                + "禁止使用 calls 数组，禁止在同一控制块或同一轮放入两个工具。\n"
+                + "单个工具使用 call；两个到四个独立工具使用 calls 数组，数组顺序就是启动顺序。"
+                + "写完这一组后必须立刻写结束标记并结束本轮回复，禁止输出第二个控制块。"
+                + "批次结果会以 results 数组返回；若用户要求的工具多于四个，必须记住尚未调用的"
+                + "清单。收到每一批真实结果后，除非失败已使任务无法继续，否则下一轮要立刻调用"
+                + "下一批尚未调用的工具，直到清单全部完成；中间结果绝不是最终答复。\n"
                 + "call 的值必须按 tool 选择以下一种字段组合：\n"
                 + "schedule_once：{\"id\":\"唯一短标识\",\"tool\":\"schedule_once\","
                 + "\"scope\":\"" + scope + "\","
@@ -1413,6 +1758,8 @@ final class HeartbeatToolProtocol {
                 + "\"scope\":\"" + scope + "\",\"url\":\"https://example.com/api\","
                 + "\"method\":\"GET\",\"headers\":{\"Accept\":\"application/json\"},"
                 + "\"body\":\"\",\"timeout_ms\":15000}\n"
+                + "search_web：{\"id\":\"唯一短标识\",\"tool\":\"search_web\","
+                + "\"scope\":\"" + scope + "\",\"query\":\"要搜索的关键词\"}\n"
                 + "shell：{\"id\":\"唯一短标识\",\"tool\":\"shell\","
                 + "\"scope\":\"" + scope + "\","
                 + "\"command\":\"which cp && cp --help | head\",\"timeout_ms\":10000}\n"
@@ -1420,6 +1767,12 @@ final class HeartbeatToolProtocol {
                 + "\"scope\":\"" + scope + "\",\"duration_ms\":5000}\n"
                 + "open_app：{\"id\":\"唯一短标识\",\"tool\":\"open_app\","
                 + "\"scope\":\"" + scope + "\",\"package\":\"com.tencent.mm\"}\n"
+                + "list_apps：{\"id\":\"唯一短标识\",\"tool\":\"list_apps\","
+                + "\"scope\":\"" + scope + "\",\"limit\":80}\n"
+                + "app_info：{\"id\":\"唯一短标识\",\"tool\":\"app_info\","
+                + "\"scope\":\"" + scope + "\",\"package\":\"com.tencent.mm\"}\n"
+                + "uninstall_app：{\"id\":\"唯一短标识\",\"tool\":\"uninstall_app\","
+                + "\"scope\":\"" + scope + "\",\"package\":\"com.example.app\"}（仅打开系统确认页）\n"
                 + "screen_power：{\"id\":\"唯一短标识\",\"tool\":\"screen_power\","
                 + "\"scope\":\"" + scope + "\",\"mode\":\"sleep\"}\n"
                 + "music：{\"id\":\"唯一短标识\",\"tool\":\"music\","
@@ -1466,6 +1819,10 @@ final class HeartbeatToolProtocol {
                 + "network_request 专门用于 HTTP/HTTPS 请求，底层默认直接调用 curl；"
                 + "method 只能是 GET、POST、PUT、PATCH、DELETE、HEAD 或 OPTIONS，"
                 + "headers 必须是字符串键值对象，timeout_ms 为 1000 到 30000。"
+                + "search_web 用于需要最新网页信息、来源核验或用户明确要求联网搜索的任务；"
+                + "结果包含 count、title、url、text、site_name 和引用 id。收到结果后先用"
+                + "‘已搜索到 N 个网页’交代数量，并列出实际使用的网页标题与来源；正文中的事实"
+                + "必须使用 [citation,domain](id) 引用，不得编造未返回的网页。"
                 + "delay 的 duration_ms 为 1 到 604800000，表示真实等待的毫秒数；"
                 + "‘锁屏后五秒亮屏’必须依次调用 screen_power(sleep)、delay(5000)、"
                 + "screen_power(wake)，每一步都等待上一步真实结果。open_app 必须填写真实包名；"
@@ -1531,7 +1888,9 @@ final class HeartbeatToolProtocol {
                 + "先根据 ok、exit_code、output、detail、encoding 与 truncated 思考下一步；"
                 + "若 ok=false 且 detail 表明参数校验失败，应按定义修正并换新 id 最多重试一次；"
                 + "若已经重试过仍失败，不得继续循环或声称成功，应如实告诉用户没有完成。"
-                + "若还需要工具，只调用一个后结束本轮，若不再需要才给最终答复。"
+                + "若用户要求多个工具或任务仍有未完成步骤，必须再调用一批最多四个尚未调用的"
+                + "工具后结束本轮，不能因为收到第一批或单个结果就提前总结；"
+                + "若不再需要才给最终答复。"
                 + "不要向用户展示结果事件标记或原始 JSON；除非结果表明仍有必要，不要重复同一调用。"
                 + "以后若收到以 " + EVENT_START + " 开头、以 " + EVENT_END
                 + " 结尾的匿名消息，那是已经到时的真实心跳活动：按其中约定自然回复，"
@@ -1561,7 +1920,22 @@ final class HeartbeatToolProtocol {
                 if (AgentToolConfig.isKnownTool(tool)) names.add(tool);
             }
         }
-        if (names.isEmpty()) {
+        AgentDeviceBridge.WorkspacePolicyV241 workspacePolicy = null;
+        if (AgentDeviceBridge.workspaceSupportedV241()) {
+            workspacePolicy = AgentDeviceBridge.workspacePolicyV241();
+            names.remove(TOOL_READ_FILE);
+            names.remove(TOOL_WRITE_FILE);
+            names.remove(TOOL_SHELL);
+            if (AgentDeviceBridge.workspaceEnabledV241()) {
+                if (workspacePolicy.read) names.add(TOOL_READ_FILE);
+                if (workspacePolicy.write) names.add(TOOL_WRITE_FILE);
+                if (workspacePolicy.shell) names.add(TOOL_SHELL);
+                if (workspacePolicy.delete) names.add(TOOL_DELETE_FILE);
+                if (workspacePolicy.transfer) names.add(TOOL_TRANSFER_FILE);
+            }
+        }
+        boolean hasPluginTools = JavaPluginPlatform.hasAgentTools();
+        if (names.isEmpty() && !hasPluginTools) {
             return "当前对话没有启用任何 Deekseep 本地工具。"
                     + "不得输出本地工具控制块，也不得声称已经执行本地操作。";
         }
@@ -1577,15 +1951,41 @@ final class HeartbeatToolProtocol {
                 : agentSystemPromptWithoutHeartbeat(now, conversationScope);
         StringBuilder allowed = new StringBuilder(base.length() + 240);
         allowed.append(base)
-                .append("\n当前用户实际启用的工具只有：");
+                .append("\n当前用户实际启用的内置工具：");
         for (int index = 0; index < names.size(); index++) {
             if (index > 0) allowed.append(", ");
             allowed.append(names.get(index));
         }
         allowed.append("。只能调用这份清单中的工具；上文示例中未列入清单的工具视为不可用，"
                 + "不得调用或假装执行。")
+                .append(workspacePolicy == null ? ""
+                        : workspaceToolContractV241(conversationScope, workspacePolicy))
+                .append(names.contains(TOOL_MCP)
+                        ? AgentMcpManager.promptContract(conversationScope) : "")
+                .append(hasPluginTools
+                        ? JavaPluginPlatform.agentPromptContract(conversationScope) : "")
                 .append(promptStrengthGuidance(promptStrength, heartbeatEnabled));
         return allowed.toString();
+    }
+
+    private static String workspaceToolContractV241(String conversationScope,
+            AgentDeviceBridge.WorkspacePolicyV241 policy) {
+        if (!AgentDeviceBridge.workspaceSupportedV241() || policy == null) return "";
+        String scope = cleanScope(conversationScope);
+        StringBuilder contract = new StringBuilder();
+        contract.append("\n2.4.1 Closed 工作区权限规则：普通确认模式下，读取、写入、Shell 和删除只能作用于 agent_workspace；每次调用都要等待用户确认。完全允许模式下，已启用的读取、写入与 Shell 可以访问外部目录，但 delete_file 仍永远只允许删除工作区内容。")
+                .append("transfer_file 永远只执行复制：外部文件可复制进工作区，工作区文件可复制到外部；恰好一个端点必须位于工作区，且禁止覆盖已有目标文件，因此不能借它修改或删除外部原文件。\n");
+        if (policy.delete) {
+            contract.append("delete_file：{\"id\":\"唯一短标识\",\"tool\":\"delete_file\",\"scope\":\"")
+                    .append(scope)
+                    .append("\",\"path\":\"/工作区绝对路径/file.txt\"}\n");
+        }
+        if (policy.transfer) {
+            contract.append("transfer_file：{\"id\":\"唯一短标识\",\"tool\":\"transfer_file\",\"scope\":\"")
+                    .append(scope)
+                    .append("\",\"source\":\"/来源绝对路径/file.txt\",\"destination\":\"/目标绝对路径/file.txt\"}\n");
+        }
+        return contract.toString();
     }
 
     /**
@@ -1602,15 +2002,17 @@ final class HeartbeatToolProtocol {
                 + "文件、Shell 与界面工具才会使用相应高权限。\n"
                 + "当前设备本地时间：" + timestamp(now) + "。当前对话绑定标识："
                 + scope + "。\n"
-                + "严格使用单步 Agent 循环：每一轮回复最多只能调用一个工具，必须先等这个工具的"
-                + "真实结果返回，下一轮才能决定是否调用下一个工具。控制块必须是纯 JSON，"
+                + "每轮最多可调用四个彼此独立的工具；存在依赖时必须等待前一批真实结果再继续。"
+                + "控制块必须是纯 JSON，"
                 + "不得放进 Markdown 代码块。固定格式：\n"
                 + CONTROL_START + "\n"
                 + "{\"call\":{\"id\":\"唯一短标识\",\"tool\":\"get_current_time\","
                 + "\"scope\":\"" + scope + "\"}}\n"
                 + CONTROL_END + "\n"
-                + "写完一个 call 后必须立刻写结束标记并结束本轮回复。禁止使用 calls 数组，"
-                + "禁止在同一控制块或同一轮放入两个工具。\n"
+                + "单个工具使用 call；两个到四个独立工具使用 calls 数组。写完一组后必须立刻"
+                + "写结束标记并结束本轮回复；批次结果会用 results 数组返回。若用户要求超过四个"
+                + "工具，收到当前批真实结果后必须继续下一批尚未调用的工具，全部完成前不得给最终"
+                + "答复。\n"
                 + "可用字段示例：\n"
                 + "get_current_time：{\"id\":\"唯一短标识\",\"tool\":\"get_current_time\","
                 + "\"scope\":\"" + scope + "\"}\n"
@@ -1628,6 +2030,8 @@ final class HeartbeatToolProtocol {
                 + "\"scope\":\"" + scope + "\",\"url\":\"https://example.com/api\","
                 + "\"method\":\"GET\",\"headers\":{\"Accept\":\"application/json\"},"
                 + "\"timeout_ms\":15000}\n"
+                + "search_web：{\"id\":\"唯一短标识\",\"tool\":\"search_web\","
+                + "\"scope\":\"" + scope + "\",\"query\":\"要搜索的关键词\"}\n"
                 + "shell：{\"id\":\"唯一短标识\",\"tool\":\"shell\","
                 + "\"scope\":\"" + scope + "\",\"command\":\"which cp\","
                 + "\"timeout_ms\":10000}\n"
@@ -1658,13 +2062,17 @@ final class HeartbeatToolProtocol {
                 + "ask_user 一次可包含 1 到 4 个问题，每题给 2 到 4 个真实候选项，不得添加占位选项。"
                 + "文件只接受绝对路径；write_file 单次最多 32768 个字符；Shell 单次最长 30 秒；"
                 + "network_request 仅接受 HTTP/HTTPS，底层默认使用 curl，最长 30 秒。"
+                + "search_web 只用于网页搜索；收到结果后显示实际网页数量和使用到的标题/来源，"
+                + "并按 [citation,domain](id) 引用返回结果，不能杜撰来源。"
                 + "只有用户明确要求或完成当前任务确实需要时才能访问文件、运行 Shell 或操作界面；"
                 + "不得擅自读取隐私文件或执行不可逆操作。每个调用都必须原样携带当前 scope。"
                 + "控制块只能放在最终回答部分，结束后必须立即停止输出；只有收到 ok=true 的真实结果"
                 + "才能用完成时描述成功。绝不要向用户解释、复述或展示控制标记与 JSON。"
                 + "以后若收到以 " + RESULT_START + " 开头、以 " + RESULT_END
-                + " 结尾的私有工具结果，先依据结果决定下一步；若仍需工具，每轮仍只调用一个，"
-                + "若不再需要才给最终答复。不要向用户展示结果事件标记或原始 JSON。";
+                + " 结尾的私有工具结果，单项读取顶层字段，批次读取 results 数组，再决定下一步；"
+                + "若用户点名的工具或任务步骤仍有任何一个未完成，每轮仍最多四个独立调用并继续"
+                + "下一批；只有全部完成或真实失败阻断任务时才给最终答复。"
+                + "不要向用户展示结果事件标记或原始 JSON。";
     }
 
     /** Extra behavioral guidance selected by the user's three-position Agent prompt slider. */
@@ -1684,10 +2092,12 @@ final class HeartbeatToolProtocol {
                 : "")
                 + "用户要求处理本地内容时按需"
                 + "使用 read_file、write_file 或 shell；需要从网络获取实时数据或调用 HTTP 接口时"
-                + "使用 network_request；用户明确要求观察或操作当前界面时可依次"
+                + "使用 search_web 或 network_request；需要网页检索优先 search_web，调用普通"
+                + "HTTP 接口才用 network_request；用户明确要求观察或操作当前界面时可依次"
                 + "使用 capture_screen、tap_screen、swipe_screen、press_back；状态、对比、进度、"
-                + "公式、角色资料或普通文字不够直观时使用 render_rich_panel。仍需一次只调用一个"
-                + "工具并等待真实结果；一句自然回复已经足够时不要调用工具。";
+                + "公式、角色资料或普通文字不够直观时使用 render_rich_panel。每轮可把最多四个"
+                + "互不依赖的工具放进同一个 calls 数组；有先后依赖时仍须等待上一批真实结果；"
+                + "一句自然回复已经足够时不要调用工具。";
         if (promptStrength < AgentToolConfig.PROMPT_STRENGTH_IMMERSIVE) {
             return enhanced;
         }
@@ -1751,6 +2161,77 @@ final class HeartbeatToolProtocol {
             result.put("detail", cleanResultText(detail, 1200));
             result.put("output", cleanResultText(rawOutput, MAX_TOOL_RESULT_TEXT));
             return RESULT_START + "\n" + result.toString() + "\n" + RESULT_END;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    static final class ToolResultItem {
+        final ToolCall call;
+        final boolean success;
+        final int exitCode;
+        final String output;
+        final String detail;
+        final String encoding;
+        final boolean truncated;
+        final boolean pending;
+
+        ToolResultItem(ToolCall call, boolean success, int exitCode,
+                       String output, String detail, String encoding,
+                       boolean truncated) {
+            this(call, success, exitCode, output, detail, encoding, truncated, false);
+        }
+
+        ToolResultItem(ToolCall call, boolean success, int exitCode,
+                       String output, String detail, String encoding,
+                       boolean truncated, boolean pending) {
+            this.call = call;
+            this.success = success;
+            this.exitCode = exitCode;
+            this.output = output == null ? "" : output;
+            this.detail = detail == null ? "" : detail;
+            this.encoding = encoding == null ? "" : encoding;
+            this.truncated = truncated;
+            this.pending = pending;
+        }
+    }
+
+    /** One private follow-up turn for up to four independent tool results. */
+    static String toolResultBatchEvent(List<ToolResultItem> items) {
+        if (items == null || items.isEmpty()) return "";
+        try {
+            JSONArray results = new JSONArray();
+            String scope = "";
+            int totalOutput = 0;
+            for (ToolResultItem item : items) {
+                if (item == null || item.call == null
+                        || results.length() >= MAX_CALLS_PER_RESPONSE) continue;
+                if (scope.length() == 0) scope = cleanScope(item.call.scope);
+                if (!scope.equals(cleanScope(item.call.scope))) continue;
+                int remaining = Math.max(0, MAX_TOOL_RESULT_TEXT - totalOutput);
+                int allowance = Math.min(12 * 1024, remaining);
+                String output = cleanResultText(item.output, allowance);
+                totalOutput += output.length();
+                JSONObject result = new JSONObject();
+                result.put("id", item.call.id);
+                result.put("tool", item.call.tool);
+                result.put("ok", item.success);
+                result.put("pending", item.pending);
+                result.put("exit_code", item.exitCode);
+                result.put("encoding", cleanResultLine(item.encoding, 24));
+                result.put("truncated", item.truncated
+                        || item.output.length() > output.length());
+                if (item.call.path.length() > 0) result.put("path", item.call.path);
+                result.put("detail", cleanResultText(item.detail, 1200));
+                result.put("output", output);
+                results.put(result);
+            }
+            if (results.length() == 0 || scope.length() == 0) return "";
+            JSONObject envelope = new JSONObject();
+            envelope.put("scope", scope);
+            envelope.put("count", results.length());
+            envelope.put("results", results);
+            return RESULT_START + "\n" + envelope.toString() + "\n" + RESULT_END;
         } catch (Throwable ignored) {
             return "";
         }
@@ -1825,6 +2306,7 @@ final class HeartbeatToolProtocol {
         String escapedIdentifier = "DEEKSEEP\\_LOCAL\\_TOOLS\\_V1";
         String[] markers = new String[]{
                 CONTROL_START,
+                "DEEKSEEP_LOCAL_TOOLS_V1]]",
                 "[[" + escapedIdentifier + "]]",
                 "\\[\\[" + escapedIdentifier + "\\]\\]",
                 "\\[\\[DEEKSEEP_LOCAL_TOOLS_V1\\]\\]",
@@ -1834,7 +2316,8 @@ final class HeartbeatToolProtocol {
         int longest = 0;
         for (String marker : markers) {
             int max = Math.min(value.length(), marker.length() - 1);
-            for (int length = max; length > longest; length--) {
+            int minimum = marker.charAt(0) == 'D' ? 8 : 1;
+            for (int length = max; length > longest && length >= minimum; length--) {
                 if (value.regionMatches(value.length() - length,
                         marker, 0, length)) {
                     longest = length;

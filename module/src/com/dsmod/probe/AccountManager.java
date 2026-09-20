@@ -21,6 +21,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -76,19 +77,25 @@ final class AccountManager {
         final boolean valid;
         final boolean retryable;
         final String error;
+        /** Safe diagnostic only: no raw token, response body, or device identifier. */
+        final String detail;
 
-        private ServerValidation(boolean valid, boolean retryable, String error) {
+        private ServerValidation(boolean valid, boolean retryable, String error, String detail) {
             this.valid = valid;
             this.retryable = retryable;
             this.error = error;
+            this.detail = detail == null ? "" : detail;
         }
 
-        static ServerValidation ok() { return new ServerValidation(true, false, null); }
+        static ServerValidation ok() { return new ServerValidation(true, false, null, ""); }
         static ServerValidation fail(String error) {
-            return new ServerValidation(false, false, error);
+            return new ServerValidation(false, false, error, "");
         }
         static ServerValidation retryable(String error) {
-            return new ServerValidation(false, true, error);
+            return new ServerValidation(false, true, error, "");
+        }
+        ServerValidation withDetail(String value) {
+            return new ServerValidation(valid, retryable, error, value);
         }
     }
 
@@ -166,53 +173,147 @@ final class AccountManager {
         return false;
     }
 
+    static JSONObject extractCredObject(JSONObject w) {
+        if (w == null) return null;
+        JSONObject cred = w.optJSONObject("cred");
+        if (cred != null) return cred;
+        JSONObject credential = w.optJSONObject("credential");
+        if (credential != null) return credential;
+        if (w.has("id") && w.has("token")) return w;
+        return null;
+    }
+
+    static List<JSONObject> parseSlotsJson(String raw) {
+        List<JSONObject> list = new ArrayList<>();
+        if (raw == null || raw.trim().isEmpty()) return list;
+        try {
+            org.json.JSONTokener tokener = new org.json.JSONTokener(raw.trim());
+            Object root = tokener.nextValue();
+            if (root instanceof JSONArray) {
+                JSONArray arr = (JSONArray) root;
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.optJSONObject(i);
+                    if (o != null) list.add(o);
+                }
+            } else if (root instanceof JSONObject) {
+                JSONObject obj = (JSONObject) root;
+                JSONArray arr = obj.optJSONArray("accounts");
+                if (arr != null) {
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject o = arr.optJSONObject(i);
+                        if (o != null) list.add(o);
+                    }
+                } else if (obj.has("id") && obj.has("token")) {
+                    list.add(obj);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return list;
+    }
+
+    private static boolean syncWithUserDb(Map<String, Account> map) {
+        File f = new File(USER_DB);
+        if (!f.exists()) return false;
+        SQLiteDatabase d = null;
+        Cursor c = null;
+        boolean added = false;
+        try {
+            d = SQLiteDatabase.openDatabase(f.getPath(), null, SQLiteDatabase.OPEN_READWRITE);
+            c = d.rawQuery("SELECT id,token,email,mobile_number,status,id_profiles,chat_status,need_birthday FROM app_user_info", null);
+            while (c.moveToNext()) {
+                String id = c.getString(0);
+                String token = c.getString(1);
+                if (id == null || id.isEmpty() || token == null || token.isEmpty()) continue;
+                if (!map.containsKey(id)) {
+                    JSONObject cred = new JSONObject();
+                    cred.put("id", id);
+                    cred.put("token", token);
+                    if (!c.isNull(2)) cred.put("email", c.getString(2));
+                    if (!c.isNull(3)) cred.put("mobile_number", c.getString(3));
+                    cred.put("status", c.getInt(4));
+                    if (!c.isNull(5)) {
+                        try { cred.put("id_profiles", new JSONArray(c.getString(5))); }
+                        catch (Throwable t) { cred.put("id_profiles", new JSONArray()); }
+                    } else {
+                        cred.put("id_profiles", new JSONArray());
+                    }
+                    if (!c.isNull(6)) {
+                        try { cred.put("chat_status", new JSONObject(c.getString(6))); }
+                        catch (Throwable t) {}
+                    }
+                    cred.put("need_birthday", c.getInt(7) != 0);
+                    Account a = fromCred(cred.toString());
+                    if (a != null) {
+                        a.savedAt = System.currentTimeMillis();
+                        map.put(id, a);
+                        added = true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (c != null) try { c.close(); } catch (Throwable ignored) {}
+            if (d != null) try { d.close(); } catch (Throwable ignored) {}
+        }
+        return added;
+    }
+
     // ── 账号槽持久化 ─────────────────────────────────────────
     // 文件结构： [ {"savedAt":long, "cred": {...原始 key_user_info...}}, ... ]，按 id 去重。
     static List<Account> listSlots() {
-        List<Account> out = new ArrayList<>();
+        Map<String, Account> map = new LinkedHashMap<>();
         String raw = readFile(SLOTS_FILE);
-        if (raw == null) return out;
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject w = arr.optJSONObject(i);
-                if (w == null) continue;
-                JSONObject cred = w.optJSONObject("cred");
+        if (raw != null) {
+            List<JSONObject> items = parseSlotsJson(raw);
+            for (JSONObject w : items) {
+                JSONObject cred = extractCredObject(w);
                 if (cred == null) continue;
                 Account a = fromCred(cred.toString());
-                if (a == null) continue;
+                if (a == null || a.id == null || a.id.isEmpty()) continue;
                 a.savedAt = w.optLong("savedAt", 0);
-                out.add(a);
+                map.put(a.id, a);
             }
-        } catch (Throwable ignored) {}
-        return out;
+        }
+        boolean newAccountsFromDb = syncWithUserDb(map);
+        if (newAccountsFromDb) {
+            JSONArray arr = new JSONArray();
+            for (Account a : map.values()) {
+                if (a != null && a.credJson != null) {
+                    JSONObject w = wrap(a.credJson);
+                    try { w.put("savedAt", a.savedAt > 0 ? a.savedAt : System.currentTimeMillis()); } catch (Throwable ignored) {}
+                    arr.put(w);
+                }
+            }
+            writeFileAtomic(SLOTS_FILE, arr.toString());
+        }
+        return new ArrayList<>(map.values());
     }
 
     // 把一份凭证 JSON 存进槽（同 id 覆盖）。返回是否成功写盘。
     static boolean upsertSlot(String credJson) {
         String id = idOf(credJson);
         if (id == null) return false;
+        upsertUserRow(credJson);
+
+        String raw = readFile(SLOTS_FILE);
+        List<JSONObject> items = parseSlotsJson(raw);
         JSONArray out = new JSONArray();
         boolean replaced = false;
-        String raw = readFile(SLOTS_FILE);
-        if (raw != null) {
-            try {
-                JSONArray arr = new JSONArray(raw);
-                for (int i = 0; i < arr.length(); i++) {
-                    JSONObject w = arr.optJSONObject(i);
-                    if (w == null) continue;
-                    JSONObject cred = w.optJSONObject("cred");
-                    String wid = cred == null ? null : cred.optString("id", null);
-                    if (id.equals(wid)) {
-                        out.put(wrap(credJson));   // 用最新凭证覆盖
-                        replaced = true;
-                    } else {
-                        out.put(w);
-                    }
-                }
-            } catch (Throwable ignored) {}
+
+        for (JSONObject w : items) {
+            JSONObject cred = extractCredObject(w);
+            String wid = cred == null ? null : cred.optString("id", null);
+            if (id.equals(wid)) {
+                out.put(wrap(credJson));   // 用最新凭证覆盖
+                replaced = true;
+            } else {
+                out.put(w);
+            }
         }
         if (!replaced) out.put(wrap(credJson));
+        if (!items.isEmpty() && out.length() < items.size()) {
+            return false;
+        }
         return writeFileAtomic(SLOTS_FILE, out.toString());
     }
 
@@ -220,18 +321,34 @@ final class AccountManager {
         if (id == null) return false;
         String raw = readFile(SLOTS_FILE);
         if (raw == null) return false;
+        List<JSONObject> items = parseSlotsJson(raw);
         JSONArray out = new JSONArray();
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject w = arr.optJSONObject(i);
-                if (w == null) continue;
-                JSONObject cred = w.optJSONObject("cred");
-                String wid = cred == null ? null : cred.optString("id", null);
-                if (!id.equals(wid)) out.put(w);
-            }
-        } catch (Throwable ignored) { return false; }
+        for (JSONObject w : items) {
+            JSONObject cred = extractCredObject(w);
+            String wid = cred == null ? null : cred.optString("id", null);
+            if (!id.equals(wid)) out.put(w);
+        }
         return writeFileAtomic(SLOTS_FILE, out.toString());
+    }
+
+    static void syncAllAccounts() {
+        try {
+            List<Account> slots = listSlots();
+            for (Account a : slots) {
+                if (a != null && a.credJson != null) {
+                    upsertUserRow(a.credJson);
+                }
+            }
+            JSONArray arr = new JSONArray();
+            for (Account a : slots) {
+                if (a != null && a.credJson != null) {
+                    JSONObject w = wrap(a.credJson);
+                    try { w.put("savedAt", a.savedAt > 0 ? a.savedAt : System.currentTimeMillis()); } catch (Throwable ignored) {}
+                    arr.put(w);
+                }
+            }
+            writeFileAtomic(SLOTS_FILE, arr.toString());
+        } catch (Throwable ignored) {}
     }
 
     private static JSONObject wrap(String credJson) {
@@ -293,15 +410,12 @@ final class AccountManager {
         LinkedHashMap<String, JSONObject> merged = new LinkedHashMap<>();
         String raw = readFile(SLOTS_FILE);
         if (raw != null) {
-            try {
-                JSONArray old = new JSONArray(raw);
-                for (int i = 0; i < old.length(); i++) {
-                    JSONObject wrapper = old.optJSONObject(i);
-                    JSONObject credential = wrapper == null ? null : wrapper.optJSONObject("cred");
-                    String id = credential == null ? null : credential.optString("id", null);
-                    if (id != null && id.length() > 0) merged.put(id, wrapper);
-                }
-            } catch (Throwable ignored) {}
+            List<JSONObject> items = parseSlotsJson(raw);
+            for (JSONObject wrapper : items) {
+                JSONObject cred = extractCredObject(wrapper);
+                String id = cred == null ? null : cred.optString("id", null);
+                if (id != null && id.length() > 0) merged.put(id, wrapper);
+            }
         }
 
         try {
@@ -343,10 +457,13 @@ final class AccountManager {
             token = credential.getString("token");
             expectedId = credential.getString("id");
         } catch (Throwable t) {
-            return ServerValidation.fail("凭证格式校验失败");
+            return ServerValidation.fail("凭证格式校验失败")
+                    .withDetail("阶段=本地 JSON/字段校验；未发出网络请求；不会写入或替换凭证。");
         }
 
         String version = appVersion(context);
+        final String fingerprint = tokenFingerprint(token);
+        final String identity = shortAccountId(expectedId);
         for (int attempt = 0; attempt < VERIFY_MAX_ATTEMPTS; attempt++) {
             HttpURLConnection connection = null;
             InputStream stream = null;
@@ -377,24 +494,37 @@ final class AccountManager {
                     body = readBoundedUtf8(stream, 512 * 1024);
                 }
                 ServerValidation result = parseServerResponse(http, body, expectedId);
-                if (!result.retryable || attempt + 1 >= VERIFY_MAX_ATTEMPTS) return result;
+                String detail = verificationDetail(identity, fingerprint, http, attempt + 1,
+                        result.detail);
+                if (!result.retryable || attempt + 1 >= VERIFY_MAX_ATTEMPTS) {
+                    return result.withDetail(detail);
+                }
 
                 long delayMs = retryDelayMillis(connection.getHeaderField("Retry-After"));
-                if (delayMs < 0L) return result;
+                if (delayMs < 0L) return result.withDetail(detail + "；重试=未取得可用 Retry-After。");
                 Thread.sleep(delayMs);
             } catch (InterruptedException t) {
                 Thread.currentThread().interrupt();
-                return ServerValidation.fail("账号校验已取消");
+                return ServerValidation.fail("账号校验已取消").withDetail(
+                        verificationDetail(identity, fingerprint, -1, attempt + 1,
+                                "阶段=等待/限速；请求被取消。"));
             } catch (java.net.SocketTimeoutException t) {
-                return ServerValidation.fail("连接 DeepSeek 服务器超时");
+                return ServerValidation.fail("连接 DeepSeek 服务器超时").withDetail(
+                        verificationDetail(identity, fingerprint, -1, attempt + 1,
+                                "阶段=网络；连接或读取超时。"));
             } catch (Throwable t) {
-                return ServerValidation.fail("无法连接或解析 DeepSeek 校验结果");
+                String kind = t.getClass().getSimpleName();
+                return ServerValidation.fail("无法连接或解析 DeepSeek 校验结果").withDetail(
+                        verificationDetail(identity, fingerprint, -1, attempt + 1,
+                                "阶段=网络/解析；异常=" + kind + "。"));
             } finally {
                 if (stream != null) try { stream.close(); } catch (Throwable ignored) {}
                 if (connection != null) connection.disconnect();
             }
         }
-        return ServerValidation.fail("DeepSeek 暂时限流，请稍后重试");
+        return ServerValidation.fail("DeepSeek 暂时限流，请稍后重试").withDetail(
+                verificationDetail(identity, fingerprint, 429, VERIFY_MAX_ATTEMPTS,
+                        "阶段=限流；已完成允许的重试次数。"));
     }
 
     /** Uses DeepSeek's own authenticated settings endpoint; callers must run this off the UI. */
@@ -430,7 +560,13 @@ final class AccountManager {
         } catch (java.net.SocketTimeoutException timeout) {
             return ServerValidation.fail("连接 DeepSeek 服务器超时");
         } catch (Throwable error) {
-            return ServerValidation.fail("无法关闭数据用于优化体验");
+            // Keep the real cause visible in the sync log so an auth-state failure during login
+            // is distinguishable from a network or risk-gate rejection.
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            String detail = cause.getClass().getSimpleName()
+                    + (cause.getMessage() == null ? "" : ": " + cause.getMessage());
+            if (detail.length() > 160) detail = detail.substring(0, 160);
+            return ServerValidation.fail("无法关闭数据用于优化体验（" + detail + "）");
         } finally {
             if (output != null) try { output.close(); } catch (Throwable ignored) {}
             if (stream != null) try { stream.close(); } catch (Throwable ignored) {}
@@ -521,10 +657,12 @@ final class AccountManager {
     static ServerValidation parseServerResponse(int http, String body, String expectedId) {
         if (http == 429) {
             return ServerValidation.retryable(
-                    "DeepSeek 暂时限流（HTTP 429），请稍后再导入");
+                    "DeepSeek 暂时限流（HTTP 429），请稍后再导入")
+                    .withDetail("响应=HTTP 429；服务器要求降低频率。");
         }
         if (http != HttpURLConnection.HTTP_OK) {
-            return ServerValidation.fail("服务器校验失败（HTTP " + http + "）");
+            return ServerValidation.fail("服务器校验失败（HTTP " + http + "）")
+                    .withDetail("响应=HTTP " + http + "；未收到可用业务成功体。");
         }
         try {
             JSONObject response = new JSONObject(body);
@@ -532,18 +670,22 @@ final class AccountManager {
             if (code != 0) {
                 if (code == 40002 || code == 401 || code == 403) {
                     return ServerValidation.fail(
-                            "凭证已失效或被服务器拒绝（code=" + code + "）");
+                            "凭证已失效或被服务器拒绝（code=" + code + "）")
+                            .withDetail("响应=外层 code=" + code + "。" );
                 }
-                return ServerValidation.fail("服务器未确认该凭证有效（code=" + code + "）");
+                return ServerValidation.fail("服务器未确认该凭证有效（code=" + code + "）")
+                        .withDetail("响应=外层 code=" + code + "。" );
             }
             JSONObject data = response.optJSONObject("data");
             if (data == null || !data.has("biz_code")) {
-                return ServerValidation.fail("服务器校验响应缺少 biz_code");
+                return ServerValidation.fail("服务器校验响应缺少 biz_code")
+                        .withDetail("响应=外层 code=0，但 data.biz_code 缺失。");
             }
             int bizCode = data.optInt("biz_code", Integer.MIN_VALUE);
             if (bizCode != 0) {
                 return ServerValidation.fail(
-                        "服务器未确认该凭证有效（biz_code=" + bizCode + "）");
+                        "服务器未确认该凭证有效（biz_code=" + bizCode + "）")
+                        .withDetail("响应=外层 code=0；biz_code=" + bizCode + "。" );
             }
             String actualId = data.optString("id", null);
             JSONObject bizData = data.optJSONObject("biz_data");
@@ -552,12 +694,47 @@ final class AccountManager {
             }
             if (actualId != null && actualId.length() > 0
                     && expectedId != null && !expectedId.equals(actualId)) {
-                return ServerValidation.fail("服务器返回的账号与文件中的账号不一致");
+                return ServerValidation.fail("服务器返回的账号与文件中的账号不一致")
+                        .withDetail("账号比对=失败；期望=" + shortAccountId(expectedId)
+                                + "，服务器=" + shortAccountId(actualId) + "。" );
             }
-            return ServerValidation.ok();
+            return ServerValidation.ok().withDetail("响应=HTTP 200；code=0；biz_code=0；账号比对=通过。" );
         } catch (Throwable t) {
-            return ServerValidation.fail("无法解析 DeepSeek 校验结果");
+            return ServerValidation.fail("无法解析 DeepSeek 校验结果")
+                    .withDetail("响应=HTTP 200，但 JSON 结构无效或不符合当前用户接口。" );
         }
+    }
+
+    /** A short stable fingerprint makes unexpected credential replacement diagnosable without logs leaking tokens. */
+    static String tokenFingerprint(String token) {
+        if (token == null || token.length() == 0) return "无";
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(token.getBytes("UTF-8"));
+            StringBuilder out = new StringBuilder(12);
+            for (int i = 0; i < 6 && i < digest.length; i++) {
+                String hex = Integer.toHexString(digest[i] & 0xff);
+                if (hex.length() < 2) out.append('0');
+                out.append(hex);
+            }
+            return out.toString();
+        } catch (Throwable ignored) {
+            return "长度" + token.length();
+        }
+    }
+
+    private static String shortAccountId(String id) {
+        if (id == null || id.length() == 0) return "未知";
+        return id.length() <= 12 ? id : id.substring(0, 8) + "…" + id.substring(id.length() - 4);
+    }
+
+    private static String verificationDetail(String account, String fingerprint, int http,
+                                             int attempt, String responseDetail) {
+        return "校验日志：接口=GET /api/v0/users/current；账号=" + account
+                + "；凭证指纹=sha256:" + fingerprint + "；尝试=" + attempt
+                + "；HTTP=" + (http < 0 ? "未取得" : String.valueOf(http))
+                + "；" + (responseDetail == null ? "" : responseDetail)
+                + " 校验只读，不会写入、刷新或替换 token；若指纹变化，变化发生在校验前，"
+                + "请排查重新登录、宿主令牌刷新、导入覆盖或手工改动账号槽。";
     }
 
     private static void awaitVerifyPacing() throws InterruptedException {
@@ -678,8 +855,9 @@ final class AccountManager {
         return id.length() > 8 ? id.substring(0, 8) : id;
     }
 
-    // 登录方式：优先 id_profiles[0].provider（大写 WECHAT/GOOGLE/APPLE）；
-    // 无第三方档案则按 手机号>邮箱 推断（有邮箱无档案通常是 GOOGLE/APPLE 邮箱登录，统一走灰白）。
+    // 登录方式：以凭证内的原生 profile provider 为第一事实来源。
+    // Google profile 即使同时带有邮箱也必须归为 GOOGLE；没有第三方 profile 时才以
+    // 手机号、邮箱回退判定。这一方法只读取本机已授权的账号槽，不传出凭证或 token。
     static String providerOf(JSONObject o) {
         try {
             JSONArray profs = o.optJSONArray("id_profiles");
@@ -694,7 +872,7 @@ final class AccountManager {
         } catch (Throwable ignored) {}
         String mobile = o.isNull("mobile_number") ? null : o.optString("mobile_number", null);
         if (mobile != null && mobile.length() > 0) return "PHONE";
-        return null;
+        return "EMAIL";
     }
 
     static String avatarOf(JSONObject o) {

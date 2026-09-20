@@ -25,6 +25,15 @@ import android.util.Log;
 public final class XposedActivationProvider extends ContentProvider {
     static final String AUTHORITY = "com.dsmod.probe.XposedService";
     static final String METHOD_REPORT_TARGET_ACTIVE = "ReportDeepSeekActive";
+    static final String M0 = "s0";
+    static final String M1 = "g0";
+    static final String M2 = "a0";
+    static final String M3 = "c0";
+    static final String M4 = "t0";
+    static final String M5 = "u0";
+    static final String M6 = "p0";
+    static final String M7 = "q0";
+    static final String M8 = "x0";
     static final String METHOD_GET_QQ_MUSIC_STATUS = "GetQqMusicStatus";
     static final String METHOD_CONTROL_LOCAL_AUDIO = "ControlLocalAudio";
     static final String METHOD_GET_LOCAL_AUDIO_STATUS = "GetLocalAudioStatus";
@@ -55,6 +64,33 @@ public final class XposedActivationProvider extends ContentProvider {
         }
         if (METHOD_REPORT_TARGET_ACTIVE.equals(method)) {
             return receiveTargetHeartbeat(extras);
+        }
+        if (M0.equals(method)) {
+            return s0(extras);
+        }
+        if (M1.equals(method)) {
+            return g0();
+        }
+        if (M2.equals(method)) {
+            return a0(extras);
+        }
+        if (M3.equals(method)) {
+            return configurePublicTunnel(extras);
+        }
+        if (M4.equals(method)) {
+            return setPublicTunnel(extras);
+        }
+        if (M5.equals(method)) {
+            return getPublicTunnel();
+        }
+        if (M6.equals(method)) {
+            return setPinggyTunnel(extras);
+        }
+        if (M7.equals(method)) {
+            return getPinggyTunnel();
+        }
+        if (M8.equals(method)) {
+            return cancelPublicTunnel();
         }
         if (METHOD_GET_QQ_MUSIC_STATUS.equals(method)) {
             return QqMusicPlaybackService.status(arg);
@@ -104,6 +140,136 @@ public final class XposedActivationProvider extends ContentProvider {
             result.putString("error", error.getClass().getSimpleName() + ": "
                     + String.valueOf(error.getMessage()));
         }
+        return result;
+    }
+
+    private Bundle s0(Bundle extras) {
+        Bundle result = new Bundle();
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Log.w(TAG, "rejected keepalive control from uid=" + callingUid);
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        boolean enabled = extras != null && extras.getBoolean("enabled", false);
+        boolean accepted = z21.setEnabled(context, enabled);
+        result.putBoolean("accepted", accepted);
+        result.putBoolean("enabled", enabled);
+        z21.putStatus(result);
+        return result;
+    }
+
+    private Bundle g0() {
+        Bundle result = new Bundle();
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        result.putBoolean("accepted", true);
+        z21.putStatus(result);
+        return result;
+    }
+
+    private Bundle a0(Bundle extras) {
+        Bundle result = new Bundle();
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            result.putBoolean("accepted", false);
+            return result;
+        }
+        boolean enabled = extras != null && extras.getBoolean("enabled", false);
+        boolean gatewayRunning = extras != null
+                && extras.getBoolean("gateway_running", false);
+        z21.acknowledge(enabled, gatewayRunning);
+        if (!enabled) z21.setEnabled(context, false);
+        result.putBoolean("accepted", true);
+        return result;
+    }
+
+    private Bundle configurePublicTunnel(Bundle extras) {
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Log.w(TAG, "rejected public tunnel configuration from uid=" + callingUid);
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        return PublicTunnelManager.configure(context, extras);
+    }
+
+    private Bundle setPublicTunnel(Bundle extras) {
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Log.w(TAG, "rejected public tunnel control from uid=" + callingUid);
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        boolean enabled = extras != null && extras.getBoolean("enabled", false);
+        return PublicTunnelManager.setRequested(context, enabled);
+    }
+
+    private Bundle getPublicTunnel() {
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        return PublicTunnelManager.status(context);
+    }
+
+    private Bundle setPinggyTunnel(Bundle extras) {
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Log.w(TAG, "rejected Pinggy tunnel control from uid=" + callingUid);
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        boolean enabled = extras != null && extras.getBoolean("enabled", false);
+        return PinggyTunnelManager.setRequested(context, enabled);
+    }
+
+    private Bundle getPinggyTunnel() {
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        return PinggyTunnelManager.status(context);
+    }
+
+    private Bundle cancelPublicTunnel() {
+        Context context = getContext();
+        int callingUid = Binder.getCallingUid();
+        if (context == null || !uidOwnsPackage(context, callingUid, TARGET_PACKAGE)) {
+            Log.w(TAG, "rejected public tunnel cancel from uid=" + callingUid);
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", false);
+            result.putString("error", "caller is not DeepSeek");
+            return result;
+        }
+        PublicTunnelManager.cancelProvisioning();
+        Bundle result = new Bundle();
+        result.putBoolean("accepted", true);
         return result;
     }
 
@@ -216,6 +382,11 @@ public final class XposedActivationProvider extends ContentProvider {
         long code = p.getLong(KEY_TARGET_VERSION_CODE, 0L);
         if (name == null || name.length() == 0) return "";
         return code > 0L ? name + " (" + code + ")" : name;
+    }
+
+    static long targetVersionCode(Context context) {
+        if (context == null) return 0L;
+        return prefs(context).getLong(KEY_TARGET_VERSION_CODE, 0L);
     }
 
     static void setStateListener(Runnable listener) {

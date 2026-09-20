@@ -297,6 +297,34 @@ final class AgentRunStore {
             persist(records);
         }
 
+        /**
+         * Retires result envelopes that are too old to resume as a new model turn.
+         * The execution claim and terminal result remain in the ledger, so a restored
+         * assistant fragment can still show its trace without repeating the side effect.
+         */
+        synchronized int expirePendingBefore(long cutoff, String detail) {
+            if (cutoff <= 0L) return 0;
+            ArrayList<Record> records = records();
+            int expired = 0;
+            long now = System.currentTimeMillis();
+            for (Record record : records) {
+                // waitingForChat() updates updatedAt on every process launch. Age the outbox
+                // from the original call instead, otherwise a years-old result becomes "fresh"
+                // each time recovery touches it and can never expire.
+                long origin = record.createdAt > 0L ? record.createdAt : record.updatedAt;
+                if (!record.hasPendingResult() || origin <= 0L
+                        || origin >= cutoff) continue;
+                record.event = "";
+                record.state = record.resultKnown && !record.resultSuccess
+                        ? STATE_FAILED : STATE_COMPLETED;
+                record.detail = clean(detail, 1200);
+                record.updatedAt = now;
+                expired++;
+            }
+            if (expired > 0) persist(records);
+            return expired;
+        }
+
         synchronized boolean cancel(String outboxId) {
             ArrayList<Record> records = records();
             Record record = findByOutbox(records, clean(outboxId, 180));
@@ -481,6 +509,10 @@ final class AgentRunStore {
 
     static void delivered(String outboxId) {
         DEFAULT.delivered(outboxId);
+    }
+
+    static int expirePendingBefore(long cutoff, String detail) {
+        return DEFAULT.expirePendingBefore(cutoff, detail);
     }
 
     static boolean cancel(String outboxId) {

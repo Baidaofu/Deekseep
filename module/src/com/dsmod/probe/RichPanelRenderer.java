@@ -3,6 +3,7 @@ package com.dsmod.probe;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -10,6 +11,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +29,8 @@ final class RichPanelRenderer {
     static final int MAX_ROWS = 24;
     static final int MAX_PANEL_JSON = 32 * 1024;
     static final int MAX_LATEX = 32 * 1024;
+    static final String TOOL_LOG_MARKER_PREFIX = "\\textsf{ 🛠  ";
+    static final String TOOL_LOG_PAYLOAD_PREFIX = "DSLG2:";
 
     private static final Set<String> PRESETS = setOf(
             "dashboard", "character", "task", "timeline", "comparison",
@@ -284,6 +288,198 @@ final class RichPanelRenderer {
         return text.startsWith("$$") && text.endsWith("$$")
                 && text.length() <= MAX_LATEX
                 && text.indexOf("\\begin{array}") >= 0;
+    }
+
+    /** Compact, genuinely drawn tool-call surface used inside the conversation timeline. */
+    static String renderToolLog(String value) {
+        return renderToolLogs(Collections.singletonList(value));
+    }
+
+    /** True when a response already contains one of our presentation-only tool carriers. */
+    static boolean hasToolLogCarrier(String value) {
+        return value != null && value.indexOf(TOOL_LOG_PAYLOAD_PREFIX) >= 0;
+    }
+
+    /** Returns the private durable call identities carried by every DSLG2 panel in text. */
+    static Set<String> toolLogTraceKeys(String value) {
+        LinkedHashSet<String> keys = new LinkedHashSet<>();
+        if (!hasToolLogCarrier(value)) return keys;
+        int cursor = 0;
+        while (cursor < value.length()) {
+            int marker = value.indexOf(TOOL_LOG_PAYLOAD_PREFIX, cursor);
+            if (marker < 0) break;
+            int start = marker + TOOL_LOG_PAYLOAD_PREFIX.length();
+            int end = start;
+            while (end < value.length() && Character.digit(value.charAt(end), 16) >= 0) end++;
+            if (end > start && ((end - start) & 1) == 0) {
+                try {
+                    byte[] bytes = new byte[(end - start) / 2];
+                    for (int index = 0; index < bytes.length; index++) {
+                        int high = Character.digit(value.charAt(start + index * 2), 16);
+                        int low = Character.digit(value.charAt(start + index * 2 + 1), 16);
+                        bytes[index] = (byte) ((high << 4) | low);
+                    }
+                    JSONArray rows = new JSONArray(new String(bytes, StandardCharsets.UTF_8));
+                    for (int index = 0; index < rows.length(); index++) {
+                        String key = rows.optJSONObject(index) == null ? ""
+                                : rows.optJSONObject(index).optString("k", "").trim();
+                        if (key.length() > 0) keys.add(key);
+                    }
+                } catch (Throwable ignored) {}
+            }
+            cursor = Math.max(end, start + 1);
+        }
+        return keys;
+    }
+
+    /**
+     * Removes presentation-only tool cards before an assistant response is saved as history.
+     * The DSLG2 payload is a local Canvas carrier, not model output; persisting it made a cold
+     * conversation restore run the presentation pass again and manufacture phantom pending rows.
+     */
+    static String stripToolLogCarriers(String value) {
+        if (!hasToolLogCarrier(value)) return value == null ? "" : value;
+        StringBuilder output = new StringBuilder(value.length());
+        int cursor = 0;
+        while (cursor < value.length()) {
+            int marker = value.indexOf(TOOL_LOG_PAYLOAD_PREFIX, cursor);
+            if (marker < 0) {
+                output.append(value, cursor, value.length());
+                break;
+            }
+            int start = value.lastIndexOf('$', marker);
+            int end = value.indexOf('$', marker);
+            if (start < cursor || end < marker) {
+                // Do not alter malformed/user-authored text merely because it mentions DSLG2.
+                output.append(value, cursor, marker + TOOL_LOG_PAYLOAD_PREFIX.length());
+                cursor = marker + TOOL_LOG_PAYLOAD_PREFIX.length();
+                continue;
+            }
+            output.append(value, cursor, start);
+            // The renderer prefixes a carrier with a Markdown hard break; remove that too so
+            // history retains exactly the assistant prose and no accumulating blank rows.
+            int size = output.length();
+            if (size >= 3 && "  \n".contentEquals(output.subSequence(size - 3, size))) {
+                output.delete(size - 3, size);
+            }
+            cursor = end + 1;
+        }
+        return output.toString();
+    }
+
+    static final class ToolLogRow {
+        final String name;
+        final String detail;
+        final String traceKey;
+        final String input;
+
+        ToolLogRow(String name, String detail, String traceKey, String input) {
+            this.name = name == null ? "" : name;
+            this.detail = detail == null ? "" : detail;
+            this.traceKey = traceKey == null ? "" : traceKey;
+            this.input = input == null ? "" : input;
+        }
+    }
+
+    /**
+     * One inline graphics node per call batch. Inline math follows the assistant text column;
+     * the formula only reserves measured space while Main draws the visible panel on Canvas.
+     */
+    static String renderToolLogs(List<String> values) {
+        if (values == null || values.isEmpty()) return "";
+        ArrayList<ToolLogRow> rows = new ArrayList<>();
+        for (String value : values) {
+            String raw = value == null ? "" : value.replace('\r', ' ').trim();
+            if (raw.length() == 0) continue;
+            int detailAt = raw.indexOf('\n');
+            rows.add(new ToolLogRow(
+                    detailAt < 0 ? raw : raw.substring(0, detailAt),
+                    detailAt < 0 ? "" : raw.substring(detailAt + 1), "", ""));
+        }
+        return renderToolLogRows(rows);
+    }
+
+    /** Encodes stable call identity/input while leaving visible pixels to Main's Canvas hook. */
+    static String renderToolLogRows(List<ToolLogRow> values) {
+        if (values == null || values.isEmpty()) return "";
+        JSONArray encodedRows = new JSONArray();
+        String widthProbe = "MMMMMMMMMMMMMM";
+        int nameLines = 0;
+        int detailLines = 0;
+        int count = 0;
+        for (ToolLogRow value : values) {
+            if (value == null) continue;
+            String name = cleanText(value.name.replace('\r', ' '), 160);
+            String detail = cleanText(value.detail.replace('\r', ' '), 220);
+            if (name.length() == 0) continue;
+            JSONObject row = new JSONObject();
+            try {
+                row.put("n", name);
+                if (detail.length() > 0) row.put("d", detail);
+                String traceKey = cleanText(value.traceKey, 240);
+                String input = cleanToolPayload(value.input, 4096);
+                if (traceKey.length() > 0) row.put("k", traceKey);
+                if (input.length() > 0) row.put("i", input);
+                encodedRows.put(row);
+            } catch (Throwable ignored) {
+                continue;
+            }
+            count++;
+            nameLines += approximateToolLogLines(name, 30, 6);
+            if (detail.length() > 0) {
+                detailLines += approximateToolLogLines(detail, 38, 3);
+            }
+            String candidate = detail.length() > name.length() ? detail : name;
+            // code249 renders the actual label on Canvas and wraps it to the carrier. Letting a
+            // long restored detail widen the invisible TeX phantom can exceed the conversation
+            // column and produce an asymmetric clipped frame after a cold reload.
+            if (!HostCompat.isV236() && candidate.length() > widthProbe.length()) {
+                widthProbe = candidate.substring(0, Math.min(candidate.length(), 38));
+            }
+        }
+        if (count == 0) return "";
+        String payload = encodeToolLogHex(
+                encodedRows.toString().getBytes(StandardCharsets.UTF_8));
+        // Keep the carrier close to surrounding assistant prose.  The Canvas renderer adds its
+        // own readable inset; paragraph-sized formula leading would otherwise create a visible
+        // blank band below a trace.
+        // Reserve the full 38dp-class visual row. The earlier estimate was smaller than the
+        // Canvas renderer after rows grew by one third, so the carrier clipped the last calls.
+        float heightEm = 3.00f
+                + Math.max(0, nameLines - count) * 0.92f
+                + detailLines * 0.68f
+                + Math.max(0, count - 1) * 2.88f;
+        String height = String.format(Locale.US, "%.2f", heightEm);
+        // rlap keeps the self-contained payload at zero width. phantom supplies only the
+        // width probe, so long names can widen the panel without exposing transport text.
+        // fbox is only a layout carrier. The module replaces its draw call with the real 8dp
+        // Canvas card. Unlike ovalbox, a missed or partial streaming frame can never flash a
+        // giant capsule before the private payload is complete.
+        return "$\\color{454A52}\\fbox{"
+                + "\\rule{0pt}{" + height + "em}"
+                + "\\phantom{\\textsf{      " + escapeText(widthProbe) + " }}"
+                + "\\rlap{" + TOOL_LOG_MARKER_PREFIX
+                + TOOL_LOG_PAYLOAD_PREFIX + payload + " }}}$";
+    }
+
+    private static int approximateToolLogLines(
+            String value, int charactersPerLine, int maximum) {
+        int length = value == null ? 0 : value.codePointCount(0, value.length());
+        if (length == 0) return 0;
+        return Math.min(maximum, Math.max(1,
+                (length + charactersPerLine - 1) / charactersPerLine));
+    }
+
+    private static String encodeToolLogHex(byte[] bytes) {
+        final char[] digits = "0123456789ABCDEF".toCharArray();
+        StringBuilder output = new StringBuilder(bytes == null ? 0 : bytes.length * 2);
+        if (bytes == null) return "";
+        for (byte value : bytes) {
+            int unsigned = value & 0xFF;
+            output.append(digits[unsigned >>> 4]);
+            output.append(digits[unsigned & 0x0F]);
+        }
+        return output.toString();
     }
 
     static Set<String> supportedRowTypes() {
@@ -1275,6 +1471,13 @@ final class RichPanelRenderer {
                 .replace('\n', ' ').trim();
         if (text.length() > maximum) text = text.substring(0, maximum);
         return text;
+    }
+
+    private static String cleanToolPayload(String value, int maximum) {
+        if (value == null) return "";
+        String text = value.replace('\u0000', ' ').replace("\r\n", "\n")
+                .replace('\r', '\n').trim();
+        return text.length() <= maximum ? text : text.substring(0, maximum);
     }
 
     private static String escapeText(String value) {

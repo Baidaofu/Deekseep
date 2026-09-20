@@ -21,8 +21,8 @@ public final class AgentDelayReceiver extends BroadcastReceiver {
                         intent.getStringExtra(EXTRA_TOKEN))) return;
         Intent complete = new Intent(ACTION_COMPLETE)
                 .setComponent(new ComponentName(
-                        "com.deepseek.chat",
-                        "com.deepseek.chat.system.ShareResultReceiver"))
+                        z21.TARGET_PACKAGE,
+                        z21.TARGET_RECEIVER))
                 .putExtra(EXTRA_TOKEN, AgentDelayActivity.TOKEN)
                 .putExtra(EXTRA_ID, intent.getStringExtra(EXTRA_ID))
                 .putExtra(EXTRA_SCOPE, intent.getStringExtra(EXTRA_SCOPE))

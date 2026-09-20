@@ -1,6 +1,8 @@
 # Android build products and local signing material
 **/build/
 **/build-protected/
+**/.gradle/
+**/local.properties
 dist/
 *.apk
 *.idsig
@@ -29,6 +31,7 @@ module/src.bak-*/
 .wekit-*/
 apk-signing/
 release-archives/
+release/*.tar.gz
 variants/
 xunlei-*/
 xl_*/

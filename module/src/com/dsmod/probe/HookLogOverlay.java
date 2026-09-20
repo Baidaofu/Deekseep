@@ -88,6 +88,9 @@ final class HookLogOverlay {
 
     static void onLog(String message) {
         if (!enabled() || message == null || message.length() == 0) return;
+        // Defensive second gate: structured overlay events can bypass Main.log().
+        if (z8.shouldSuppressGeneralMessage(message)) return;
+        if (Main.isLocalApiLogMuted() && !z8.isError(message)) return;
         String clean = englishOnly(message.replace('\n', ' ').replace('\r', ' ')).trim();
         if (clean.length() == 0 || isNoisy(clean)) return;
         if (clean.length() > 520) clean = clean.substring(0, 517) + "…";

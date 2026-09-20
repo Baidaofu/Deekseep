@@ -13,11 +13,13 @@ import java.lang.reflect.Modifier;
  * Keeping the legacy path as an identity mapping is intentional: one module APK therefore works
  * with both host families.</p>
  */
-final class HostCompat {
+public final class HostCompat {
     private static volatile boolean initialized;
     private static volatile boolean v230;
     private static volatile boolean v234;
     private static volatile boolean v236;
+    private static volatile boolean v241;
+    private static volatile boolean v250;
     private static volatile boolean googlePlay;
     /**
      * 2.2.1 moved Kotlin Unit out of the Compose helper named {@code ui8}.  The
@@ -32,19 +34,28 @@ final class HostCompat {
     static synchronized void initialize(ClassLoader loader) {
         if (initialized) return;
         googlePlay = classExists(loader, "com.pairip.licensecheck.LicenseActivity");
-        v234 = hasCompletionRequest(loader, googlePlay ? "gz0" : "nx0");
+        // 2.5.0 (versionCode 268, verified against the Google Play APK) dropped the pairip
+        // protector entirely: com.pairip.licensecheck.LicenseActivity no longer exists in this
+        // build at all, so the marker above cannot distinguish Google Play from mainland for
+        // this generation. Only the Google Play flavor has been analyzed so far; treat a
+        // verified v250 host as Google Play rather than guess a mainland table, the same way
+        // v236 above declines to guess an unverified GP 2.3.6 table.
+        v250 = hasV250CompletionRequest(loader);
+        if (v250) googlePlay = true;
+        v241 = !googlePlay && hasCompletionRequest(loader, "az0");
+        v234 = v241 || hasCompletionRequest(loader, googlePlay ? "gz0" : "nx0");
         // Mainland 2.3.6 keeps the 2.3.4 completion request name but moves the chat ViewModel
         // from kd1 to td1. Do not use mere kd1 absence as a marker: 2.3.6 reuses kd1 for the
         // ViewModel's coroutine continuation, so both names legitimately exist in that APK.
         // Match td1's actual ViewModel contract instead. A GP 2.3.6 table is intentionally not
         // guessed without its APK.
-        v236 = !googlePlay && v234 && hasV236ChatViewModel(loader);
+        v236 = !v241 && !googlePlay && v234 && hasV236ChatViewModel(loader);
         v230 = v234 || hasV230CompletionRequest(loader);
         legacyUnitUsesTi8 = !v230 && hasNonStaticUi8Unit(loader);
         initialized = true;
     }
 
-    static boolean isV230() {
+    public static boolean isV230() {
         return v230;
     }
 
@@ -56,23 +67,45 @@ final class HostCompat {
         return v236;
     }
 
+    static boolean isV241() {
+        return v241;
+    }
+
+    static boolean isV250() {
+        return v250;
+    }
+
     static boolean isGooglePlay() {
         return googlePlay;
     }
 
+    /**
+     * Hosts that still have a maintained, verified symbol table.  Do not let a package which
+     * merely shares DeepSeek's application id fall through to the old 2.2 mapping: that path
+     * would install stale hooks and can make the protected watchdog terminate the host.
+     */
+    static boolean supportsMaintainedFeatureRuntime() {
+        return v250 || v234 || v236 || v241;
+    }
+
     static String diagnosticSummary() {
         return "channel=" + (googlePlay ? "google-play" : "mainland")
-                + "\ngeneration=" + (v236 ? "2.3.6" : v234 ? "2.3.4"
-                : v230 ? "2.3.0" : "2.2.x")
+                + "\ngeneration=" + (v250 ? "2.5.0" : v241 ? "2.4.1" : v236 ? "2.3.6"
+                : v234 ? "2.3.4" : v230 ? "2.3.0" : "2.2.x")
                 + "\nlegacyUnit=" + (legacyUnitUsesTi8 ? "ti8" : "ui8");
     }
 
     /** 2.3.0 moved the canonical editor session state list from field e to f. */
     static String editorSessionStateField() {
-        return v230 ? "f" : "e";
+        // code257 jh moved the canonical SnapshotStateList to f; e is now an unrelated t92.
+        // Reading e made the module miss every live directory mutation until process restart.
+        // code249 fh.e(lq) appends through bh1 into fh.f (yz7 SnapshotStateList). fh.e is m62.
+        return v241 ? "f" : v236 ? "f" : v230 ? "f" : "e";
     }
 
     static String generationName() {
+        if (v250) return "2.5.0/code268-gp";
+        if (v241) return "2.4.1/code257-cn";
         if (v236) return "2.3.6/code249-cn";
         if (v234) return googlePlay ? "2.3.4/code246-gp" : "2.3.4/code245-cn";
         return v230 ? "2.3.0/code237" : "2.2.x";
@@ -80,21 +113,35 @@ final class HostCompat {
 
     static boolean supportsHostVersionName(String versionName) {
         if (versionName == null) return true;
+        String value = normalizedVersionName(versionName);
+        return "2.2.1".equals(value)
+                || "2.2.2".equals(value)
+                || "2.3.4".equals(value) || "2.3.6".equals(value)
+                || "2.4.1".equals(value) || "2.5.0".equals(value);
+    }
+
+    static boolean isRetiredVersionName(String versionName) {
+        String value = normalizedVersionName(versionName);
+        return "2.2.0".equals(value) || "2.3.0".equals(value)
+                || "2.3.1".equals(value);
+    }
+
+    private static String normalizedVersionName(String versionName) {
+        if (versionName == null) return "";
         String value = versionName.trim();
         int suffix = value.indexOf('-');
-        if (suffix > 0) value = value.substring(0, suffix);
-        return "2.2.0".equals(value) || "2.2.1".equals(value)
-                || "2.2.2".equals(value) || "2.3.0".equals(value)
-                || "2.3.4".equals(value) || "2.3.6".equals(value);
+        return suffix > 0 ? value.substring(0, suffix) : value;
     }
 
     static String localApiAuthInterceptorClass() {
+        if (v241) return "of0";
         if (v236) return "se0";
         if (v234) return googlePlay ? "eg0" : "se0";
         return v230 ? "td0" : "id0";
     }
 
     static String localApiHeaderBuilderClass() {
+        if (v241) return "gv3";
         if (v236) return "lq3";
         if (v234) return googlePlay ? "gs3" : "cq3";
         return v230 ? "tm3" : "jk3";
@@ -117,6 +164,7 @@ final class HostCompat {
     }
 
     static String unitClass() {
+        if (v241) return "d39";
         if (v236) return "mu8";
         if (v234) return googlePlay ? "hy8" : "fu8";
         if (v230) return "vl8";
@@ -245,16 +293,206 @@ final class HostCompat {
         return false;
     }
 
-    static Class<?> load(ClassLoader loader, String legacyName)
+    /**
+     * DeepSeek 2.5.0 renamed the completion-request data class to r51 and reordered its
+     * declared fields, but its real (non-synthetic) constructor keeps the classic 11-arg
+     * shape checked by {@link #hasCompletionRequest}. Match it under its own name and, like
+     * {@link #hasV230CompletionRequest}'s ct0 check, require r51's h21 transport marker
+     * interface as well, so an unrelated future class coincidentally named r51 cannot flip
+     * this whole table.
+     */
+    private static boolean hasV250CompletionRequest(ClassLoader loader) {
+        try {
+            Class<?> candidate = Class.forName("r51", false, loader);
+            for (Constructor<?> constructor : candidate.getDeclaredConstructors()) {
+                Class<?>[] p = constructor.getParameterTypes();
+                if (p.length == 11
+                        && p[0] == String.class
+                        && p[2] == String.class
+                        && p[4] == boolean.class
+                        && p[5] == boolean.class
+                        && p[7] == boolean.class
+                        && p[8] == String.class
+                        && p[9] == String.class
+                        && p[10] == int.class) {
+                    for (Class<?> iface : candidate.getInterfaces()) {
+                        if (iface != null && "h21".equals(iface.getSimpleName())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /**
+     * 2.5.0 kotlinx.serialization request classes, identified by grepping the wire field
+     * names captured from a live MITM session against the decompiled sources (R8 keeps
+     * serialization field-name string constants even when it renames everything else).
+     * These are intentionally exposed as their own v250-only accessors rather than chained
+     * into the shared cross-generation helpers above: no other 2.5.0 feature symbol
+     * (local API interceptor, editor session field, unit class, etc.) has been verified yet,
+     * and guessing them the way the rest of this file avoids guessing would be worse than
+     * leaving the feature hooks unported until a follow-up pass verifies each one.
+     */
+    static String v250ChatFullCompletionRequestClass() {
+        // com.deepseek.chat.network.chat.model.chat.ChatFullCompletionRequest. Fields in
+        // declared/serialized order: chat_session_id, parent_message_id, prompt, ref_file_ids,
+        // thinking_enabled, search_enabled, audio_id, preempt, model_type, action.
+        return v250 ? "r51" : null;
+    }
+
+    static String v250ChatEditMessageRequestClass() {
+        // com.deepseek.chat.network.chat.model.chat.ChatEditMessageRequest. Fields:
+        // chat_session_id, message_id, prompt, ref_file_ids, thinking_enabled, search_enabled,
+        // client_stream_id, action.
+        return v250 ? "s41" : null;
+    }
+
+    /**
+     * Repository class owning every 2.5.0 chat-completion suspend method (I, J, h0, v, B,
+     * o0, ...). R8 has horizontally merged this class with large amounts of unrelated
+     * vector-drawable/Path/PorterDuff/Typeface utility code, so it is not a normal
+     * single-purpose ViewModel/repository -- do not assume an arbitrary method on it is
+     * chat-related without checking its body.
+     */
+    static String v250ChatRepositoryClass() {
+        return v250 ? "b18" : null;
+    }
+
+    /**
+     * Sends a brand-new user message. Builds {@link #v250ChatFullCompletionRequestClass()}
+     * through an inner coroutine flow body (class c41) and submits it. Confirmed as the
+     * "new message" entry point: it is called from exactly two sites, the merged ViewModel
+     * class kp1 (the live UI action) and its own generated coroutine continuation d41, and it
+     * performs a local optimistic message insert before delegating (through the b18.o0 helper)
+     * into the network flow.
+     */
+    static String v250SendCompletionMethod() {
+        return v250 ? "I" : null;
+    }
+
+    /**
+     * Edits a previous message and regenerates from it. Builds
+     * {@link #v250ChatEditMessageRequestClass()} through the same c41 flow-body class (its
+     * alternate constructor overload). Confirmed the same way as {@link
+     * #v250SendCompletionMethod()}: called only from kp1 and its own continuation e41.
+     */
+    static String v250EditCompletionMethod() {
+        return v250 ? "J" : null;
+    }
+
+    public static Class<?> load(ClassLoader loader, String legacyName)
             throws ClassNotFoundException {
         return loader.loadClass(name(legacyName));
     }
 
-    static String name(String legacyName) {
+    public static String name(String legacyName) {
         if (legacyName == null) return null;
         String v230Name = v230 ? name230(legacyName) : legacyName;
         String v234Name = v234 ? name234(v230Name) : v230Name;
+        if (v241) return name241(name236(v234Name));
         return v236 ? name236(v234Name) : v234Name;
+    }
+
+    /** Mainland 2.4.1/code257 symbols, keyed by their reviewed 2.3.6 counterparts. */
+    private static String name241(String name236) {
+        if (name236 == null) return null;
+        switch (name236) {
+            // The session/message pair is not part of the broad generated table: 2.4.1
+            // inserts a constructor and a static merge helper, but keeps the data layout.
+            // Resolve these explicitly or the old aq/cp pipeline stops at lq/mp and all
+            // history/anti-recall hooks silently install against the wrong generation.
+            case "lq": return "pq";
+            case "mp": return "rp";
+            case "td1": return "zg1";
+            case "ew": return "jw";
+            case "gw": return "lw";
+            case "pt": return "tt";
+            case "yx0": return "lz0";
+            case "fh": return "jh";
+            case "xl7": return "ct7";
+            case "uo5": return "ou5";
+            case "co5": return "wt5";
+            case "u68": return "ef8";
+            case "ca1": return "wc1";
+            case "le2": return "zh2";
+            case "oc1": return "sf1";
+            case "v45": return "na5";
+            case "vv5": return "p16";
+            case "tr2": return "iv2";
+            case "ts4": return "ey4";
+            case "kt4": return "vy4";
+            case "yq8": return "nz8";
+            case "ur2": return "jv2";
+            case "ct2": return "rw2";
+            case "et2": return "tw2";
+            case "wi8": return "hr8";
+            case "r48": return "ad8";
+            case "k48": return "tc8";
+            case "b48": return "kc8";
+            case "yz7": return "k88";
+            case "gd4": return "qi4";
+            case "bg4": return "ll4";
+            // kotlinx.serialization JsonElement. code249's qe4 name is reused by
+            // Kotlin Intrinsics in code257 and has no Companion/serializer. The
+            // JSON patch payload type consumed by jo0/lw is ak4 on this exact host.
+            case "qe4": return "ak4";
+            case "aw9": return "y4a";
+            case "hd6": return "kj6";
+            case "h48": return "qc8";
+            case "k77": return "ke7";
+            case "c3a": return "aca";
+            // Login entry state/options were re-obfuscated together in code257.  Keep these
+            // translations in the exact 2.4.1 table: code249 still uses v45/i45.
+            case "i45": return "y95";
+            // Password-login ViewModel and its reducer events.  The logical keys below are the
+            // reviewed code249 symbols used by Main's candidate-account adapter.
+            case "ge6": return "jk6";
+            case "ae6": return "dk6";
+            case "be6": return "ek6";
+            case "ce6": return "fk6";
+            case "qv9": return "o4a";
+            // AccountManager changed its live user model from tw to ax in code257.
+            case "tw": return "ax";
+            case "w04": return "c64";
+            case "m52": return "u82";
+            case "y23": return "b73";
+            case "j42": return "s72";
+            // i42 is the Continuation interface; wh2 is only one implementation in code257.
+            // Reflection signatures must use the interface itself (r72).
+            case "i42": return "r72";
+            case "c52": return "l82";
+            case "sx8": return "o69";
+            case "yx8": return "u69";
+            case "jx8": return "b69";
+            case "ei8": return "oq8";
+            case "v6a": return "ufa";
+            // code257 history stream parser: zs7.a(boolean, ut9, r72).
+            case "zj9": return "ut9";
+            case "gl1": return "po1";
+            case "me2": return "ai2";
+            case "jx7": return "w58";
+            case "wp": return "aq";
+            case "n51": return "g71";
+            case "dz1": return "p22";
+            case "wc5": return "fd5";
+            case "zm7": return "yu7";
+            case "rg3": return "il3";
+            case "gh3": return "xl3";
+            case "pv1": return "zy1";
+            case "wh8": return "gq8";
+            case "mu8": return "d39";
+            case "pp5": return "jv5";
+            case "lw7": return "y48";
+            case "pc5": return "bf5";
+            case "nx0": return "az0";
+            // Kotlin runBlocking: rc5.c0 in code249 -> kx9.P in code257.
+            // The signature remains (CoroutineContext, Function2) -> Object.
+            case "rc5": return "kx9";
+            default: return name236;
+        }
     }
 
     private static String name230(String legacyName) {
@@ -667,6 +905,12 @@ final class HostCompat {
 
     static String method(String legacyOwner, String legacyMethod) {
         if (legacyOwner == null || legacyMethod == null) return legacyMethod;
+        if (v241 && "ed0".equals(legacyOwner) && "h".equals(legacyMethod)) {
+            return "o";
+        }
+        if (v241 && "u82".equals(legacyOwner) && "K".equals(legacyMethod)) {
+            return "P";
+        }
         String mapped = v230 ? method230(legacyOwner, legacyMethod) : legacyMethod;
         if (!v234) return mapped;
         // Kotlin runBlocking moved from f0 to rc5.c0 in mainland code249.
@@ -743,31 +987,64 @@ final class HostCompat {
     }
 
     static String sessionMergeMethod() {
+        if (v241) return "y";
         return v234 ? "x" : (v230 ? "u" : "u");
     }
 
     static String sessionReplaceMethod() {
+        if (v241) return "u";
         return v234 ? "t" : "q";
     }
 
     static String sessionReplaceWithTextMethod() {
+        if (v241) return "t";
         return v234 ? "s" : "p";
     }
 
+    /** ChatSessionComponent methods shifted by one in code257 after a new action was inserted. */
+    static String chatViewModelMethod(String code249Name) {
+        if (!v241 || code249Name == null) return code249Name;
+        switch (code249Name) {
+            case "A": return "B";
+            case "B": return "C";
+            case "C": return "D";
+            case "D": return "E";
+            case "E": return "F";
+            case "F": return "G";
+            case "G": return "H";
+            case "H": return "I";
+            case "I": return "J";
+            case "J": return "K";
+            case "K": return "L";
+            case "L": return "M";
+            case "M": return "N";
+            case "N": return "O";
+            case "O": return "P";
+            case "P": return "Q";
+            case "Q": return "R";
+            case "R": return "S";
+            case "S": return "T";
+            default: return code249Name;
+        }
+    }
+
     /** Suspend endpoint used to create the hidden session owned by the local API. */
-    static String localApiSessionCreateMethod() {
+    public static String localApiSessionCreateMethod() {
+        if (v241) return "w";
         if (v234) return googlePlay ? "a" : "u";
         return method("i91", "a");
     }
 
     /** Suspend endpoint used to delete one hidden local-API session. */
-    static String localApiSessionDeleteMethod() {
+    public static String localApiSessionDeleteMethod() {
+        if (v241) return "y";
         if (v234) return googlePlay ? "c" : "w";
         return method("i91", "c");
     }
 
     /** Request data class accepted by {@link #localApiSessionDeleteMethod()}. */
     static String localApiSessionDeleteRequestClass() {
+        if (v241) return "jh1";
         if (v234) return googlePlay ? "of1" : "ud1";
         return name("jb1");
     }
@@ -801,7 +1078,9 @@ final class HostCompat {
     /** Native "data used to improve experience" Compose control for every supported host. */
     static Method trainingControlMethod(ClassLoader loader) {
         String[][] candidates;
-        if (v236) {
+        if (v241) {
+            candidates = new String[][]{{"k56", "l"}};
+        } else if (v236) {
             candidates = new String[][]{{"no9", "k"}};
         } else if (v234) {
             candidates = googlePlay
@@ -826,7 +1105,9 @@ final class HostCompat {
     /** Root Compose renderer for the normal/forced client-update dialog. */
     static Method updateDialogMethod(ClassLoader loader) {
         String[][] candidates;
-        if (v236) {
+        if (v241) {
+            candidates = new String[][]{{"s95", "h"}};
+        } else if (v236) {
             candidates = new String[][]{{"ea5", "g"}};
         } else if (v234) {
             candidates = googlePlay

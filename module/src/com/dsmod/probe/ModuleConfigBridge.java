@@ -28,6 +28,7 @@ final class ModuleConfigBridge {
     static final String EXTRA_REPLY = "reply";
     static final String MODE_EXPORT = "export";
     static final String MODE_IMPORT = "import";
+    static final String MODE_OPEN_SETTINGS = "open-settings";
     static final int RESULT_OK = 1;
     static final int RESULT_ERROR = -1;
 
@@ -39,10 +40,11 @@ final class ModuleConfigBridge {
     private static volatile boolean installed;
     private static BroadcastReceiver receiver;
 
-    /* Deliberately excludes prompts, service credentials, conversations, images and logs. */
+    /* Deliberately excludes prompts, Local API credentials, conversations, images and logs. */
     private static final String[] ALLOW = {
             "deekseep_enabled",
             "deekseep_google_login_unlock",
+            "deekseep_password_login_unlock",
             "deekseep_wechat_mobile_login_unlock",
             "deekseep_nocensor",
             "deekseep_expert_unlock",
@@ -74,10 +76,37 @@ final class ModuleConfigBridge {
             receiver = new BroadcastReceiver() {
                 @Override public void onReceive(Context ignored, Intent intent) {
                     if (intent == null || !TOKEN.equals(intent.getStringExtra(EXTRA_TOKEN))) return;
+                    String mode = intent.getStringExtra(EXTRA_MODE);
+                    if (MODE_OPEN_SETTINGS.equals(mode)) {
+                        Main.openSettingsFromExternal();
+                        return;
+                    }
+                    if ("enable-local-api".equals(mode)) {
+                        ResultReceiver reply = intent.getParcelableExtra(EXTRA_REPLY);
+                        if (CloudPromptClient.supported() && !CloudPromptClient.hasLocalApiGrant(app)) {
+                            CloudPromptClient.activate(app, (ok, error) -> {
+                                boolean applied = ok && Main.setLocalApiEnabled(true);
+                                Main.log("bridge async enable-local-api result=" + applied + " error=" + error);
+                                if (reply != null) {
+                                    Bundle out = new Bundle();
+                                    out.putString(EXTRA_JSON, applied ? "ok" : "failed");
+                                    reply.send(applied ? RESULT_OK : RESULT_ERROR, out);
+                                }
+                            });
+                        } else {
+                            boolean ok = Main.setLocalApiEnabled(true);
+                            Main.log("bridge enable-local-api result=" + ok);
+                            if (reply != null) {
+                                Bundle out = new Bundle();
+                                out.putString(EXTRA_JSON, ok ? "ok" : "failed");
+                                reply.send(ok ? RESULT_OK : RESULT_ERROR, out);
+                            }
+                        }
+                        return;
+                    }
                     ResultReceiver reply = intent.getParcelableExtra(EXTRA_REPLY);
                     if (reply == null) return;
                     try {
-                        String mode = intent.getStringExtra(EXTRA_MODE);
                         String json;
                         if (MODE_EXPORT.equals(mode)) {
                             json = exportJson();
@@ -115,6 +144,34 @@ final class ModuleConfigBridge {
         if (json != null) intent.putExtra(EXTRA_JSON, json);
         intent.putExtra(EXTRA_REPLY, reply);
         return intent;
+    }
+
+    /** Fire-and-forget request that asks the injected target to open its settings page. */
+    static Intent requestOpenSettings() {
+        Intent intent = new Intent(ACTION).setPackage(TARGET);
+        intent.putExtra(EXTRA_TOKEN, TOKEN);
+        intent.putExtra(EXTRA_MODE, MODE_OPEN_SETTINGS);
+        return intent;
+    }
+
+    /** In-process export used by the injected settings surface (no broadcast needed). */
+    static String exportConfigJson() {
+        try {
+            return exportJson();
+        } catch (Throwable error) {
+            return null;
+        }
+    }
+
+    /** In-process import used by the injected settings surface (no broadcast needed). */
+    static String importConfigJson(String json) {
+        try {
+            importJson(json);
+            return "ok";
+        } catch (Throwable error) {
+            return error.getClass().getSimpleName()
+                    + ": " + String.valueOf(error.getMessage());
+        }
     }
 
     private static String exportJson() throws Exception {

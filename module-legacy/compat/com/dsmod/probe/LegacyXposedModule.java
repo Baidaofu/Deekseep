@@ -163,6 +163,9 @@ abstract class LegacyXposedModule {
                 // suppress every other module hooked to the same host member.
                 XposedBridge.hookMethod(member, new XC_MethodHook(Integer.MIN_VALUE) {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        long started = System.nanoTime();
+                        long traceId = RawHookTrace.enter(member, param.thisObject, param.args);
+                        JavaPluginRuntimeBridge.before(member, param.thisObject, param.args);
                         try {
                             List<Hooker> snapshot = Arrays.asList(
                                     hookers.toArray(new Hooker[hookers.size()]));
@@ -170,13 +173,24 @@ abstract class LegacyXposedModule {
                                     ? new Object[0] : param.args.clone();
                             Chain chain = new Chain(
                                     member, param, snapshot, 0, param.args, original);
-                            param.setResult(chain.proceed());
+                            Object result = chain.proceed();
+                            RawHookTrace.exit(traceId, member, result,
+                                    System.nanoTime() - started);
+                            JavaPluginRuntimeBridge.after(member, result,
+                                    System.nanoTime() - started);
+                            param.setResult(result);
                         } catch (Throwable error) {
+                            RawHookTrace.failed(traceId, member, error,
+                                    System.nanoTime() - started);
+                            JavaPluginRuntimeBridge.error(member, error,
+                                    System.nanoTime() - started);
                             param.setThrowable(error);
                         }
                     }
                 });
                 registered = true;
+                RawHookTrace.registered(member);
+                JavaPluginRuntimeBridge.registered(member);
             } catch (RuntimeException error) {
                 hookers.remove(hooker);
                 throw error;

@@ -16,12 +16,14 @@ import android.graphics.drawable.StateListDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.LinearLayout;
+import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -117,6 +119,19 @@ final class RemoteFeatureFlagsUi {
             if (displayed++ > 0) featureCard.addView(divider(activity, divider));
             addFeatureRow(activity, featureCard, feature, text, secondary, dark);
         }
+        // The reviewed code257 APK contains the native session multi-select screen, menu action,
+        // analytics event and batch endpoints, but no independent Boolean rollout key in its
+        // remote-settings repository. Surface that verified capability here without inventing a
+        // fake kv_remote_settings_* key that would never control the host.
+        if (HostCompat.isV241()) {
+            if (displayed++ > 0) featureCard.addView(divider(activity, divider));
+            addV241NativeMultiSelectRow(activity, featureCard, text, secondary, dark);
+        }
+        for (RemoteFeatureFlags.Parameter parameter : RemoteFeatureFlags.PARAMETERS) {
+            if (!RemoteFeatureFlags.isSupported(parameter)) continue;
+            if (displayed++ > 0) featureCard.addView(divider(activity, divider));
+            addParameterRow(activity, featureCard, parameter, text, secondary, dark);
+        }
 
         TextView reset = new TextView(activity);
         reset.setText(UiLanguage.text(activity,
@@ -128,6 +143,32 @@ final class RemoteFeatureFlagsUi {
         reset.setBackground(touchBackground(dark, true));
         reset.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
+                if (HostCompat.isV241()) {
+                    reset.setEnabled(false);
+                    reset.setText(UiLanguage.text(activity,
+                            "正在保存…", "Saving…"));
+                    RemoteFeatureFlags.resetAllV241Async(activity.getClassLoader(),
+                            new RemoteFeatureFlags.WriteCallback() {
+                                @Override public void onComplete(boolean success) {
+                                    reset.setEnabled(true);
+                                    reset.setText(UiLanguage.text(activity,
+                                            "全部恢复为跟随服务器",
+                                            "Reset all to follow server"));
+                                    if (success) {
+                                        Toast.makeText(activity, UiLanguage.text(activity,
+                                                "已恢复，正在重启 DeepSeek",
+                                                "Reset; restarting DeepSeek"),
+                                                Toast.LENGTH_SHORT).show();
+                                        restartHost(activity);
+                                    } else {
+                                        Toast.makeText(activity, UiLanguage.text(activity,
+                                                "恢复失败", "Reset failed"),
+                                                Toast.LENGTH_SHORT).show();
+                                    }
+                                }
+                            });
+                    return;
+                }
                 if (RemoteFeatureFlags.resetAll(activity.getClassLoader())) {
                     Toast.makeText(activity, UiLanguage.text(activity,
                             "已恢复，正在重启 DeepSeek",
@@ -165,6 +206,96 @@ final class RemoteFeatureFlagsUi {
                 return false;
             }
         });
+    }
+
+    private static void addParameterRow(final Activity activity, LinearLayout parent,
+            final RemoteFeatureFlags.Parameter parameter, int text, int secondary, boolean dark) {
+        LinearLayout row = new LinearLayout(activity);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(activity, 16), dp(activity, 13), dp(activity, 14), dp(activity, 13));
+        row.setClickable(true);
+        row.setBackground(touchBackground(dark, false));
+
+        LinearLayout labels = new LinearLayout(activity);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        TextView heading = new TextView(activity);
+        heading.setText(UiLanguage.text(activity, parameter.zh, parameter.en));
+        heading.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        heading.setTextColor(text);
+        labels.addView(heading);
+        TextView detail = new TextView(activity);
+        detail.setText(UiLanguage.text(activity, parameter.detailZh, parameter.detailEn));
+        detail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        detail.setTextColor(secondary);
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        detailParams.topMargin = dp(activity, 3);
+        labels.addView(detail, detailParams);
+        LinearLayout.LayoutParams labelsParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        labelsParams.rightMargin = dp(activity, 10);
+        row.addView(labels, labelsParams);
+
+        final TextView value = new TextView(activity);
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        value.setTextColor(DeekseepUi.BRAND);
+        value.setGravity(Gravity.CENTER);
+        value.setPadding(dp(activity, 8), dp(activity, 5), dp(activity, 8), dp(activity, 5));
+        Integer current = RemoteFeatureFlags.parameterValue(activity.getClassLoader(), parameter.key);
+        value.setText(current == null ? UiLanguage.text(activity, "跟随", "Follow")
+                : String.valueOf(current.intValue()));
+        row.addView(value, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View ignored) {
+                final EditText input = new EditText(activity);
+                input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+                Integer current = RemoteFeatureFlags.parameterValue(activity.getClassLoader(), parameter.key);
+                if (current != null) input.setText(String.valueOf(current.intValue()));
+                input.setSelectAllOnFocus(true);
+                int margin = dp(activity, 24);
+                LinearLayout holder = new LinearLayout(activity);
+                holder.setPadding(margin, 0, margin, 0);
+                holder.addView(input, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                new AlertDialog.Builder(activity)
+                        .setTitle(UiLanguage.text(activity, parameter.zh, parameter.en))
+                        .setMessage(UiLanguage.text(activity,
+                                "警告：该值直接写入宿主本地配置。异常值可能导致语音、上传或请求异常，并可能触发服务器风控；后果自负。",
+                                "Warning: this is written directly to the host local configuration. "
+                                        + "Invalid values may break functionality or trigger server risk controls."))
+                        .setView(holder)
+                        .setNegativeButton(UiLanguage.text(activity, "取消", "Cancel"), null)
+                        .setPositiveButton(UiLanguage.text(activity, "应用并重启", "Apply and restart"),
+                                new DialogInterface.OnClickListener() {
+                                    @Override public void onClick(DialogInterface dialog, int which) {
+                                        String raw = input.getText().toString().trim();
+                                        try {
+                                            int wanted = Integer.parseInt(raw);
+                                            if (RemoteFeatureFlags.setParameterValue(activity.getClassLoader(),
+                                                    parameter.key, wanted)) {
+                                                Toast.makeText(activity, UiLanguage.text(activity,
+                                                        "参数已写入，正在重启 DeepSeek",
+                                                        "Parameter saved; restarting DeepSeek"),
+                                                        Toast.LENGTH_SHORT).show();
+                                                restartHost(activity);
+                                            } else {
+                                                Toast.makeText(activity, UiLanguage.text(activity,
+                                                        "保存失败", "Could not save parameter"),
+                                                        Toast.LENGTH_SHORT).show();
+                                            }
+                                        } catch (Throwable error) {
+                                            Toast.makeText(activity, UiLanguage.text(activity,
+                                                    "请输入 32 位整数范围内的数值", "Enter a 32-bit integer"),
+                                                    Toast.LENGTH_SHORT).show();
+                                        }
+                                    }
+                                }).show();
+            }
+        });
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private static void addFeatureRow(final Activity activity, LinearLayout parent,
@@ -209,6 +340,7 @@ final class RemoteFeatureFlagsUi {
 
         row.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
+                if (Boolean.TRUE.equals(state.getTag())) return;
                 showModePicker(activity, feature, state, dark);
             }
         });
@@ -231,13 +363,63 @@ final class RemoteFeatureFlagsUi {
                 UiLanguage.text(activity, "强制开启并重启", "Force on and restart"),
                 UiLanguage.text(activity, "强制关闭并重启", "Force off and restart")
         };
-        AlertDialog dialog = new AlertDialog.Builder(activity)
-                .setTitle(UiLanguage.text(activity, feature.zh, feature.en))
+        AlertDialog.Builder pickerBuilder = new AlertDialog.Builder(activity)
+                .setTitle(UiLanguage.text(activity, feature.zh, feature.en));
+        if (feature.key.contains("parallel") || feature.key.contains("prefetch")
+                || feature.key.contains("report") || feature.key.contains("gcy")
+                || feature.key.contains("volcengine") || feature.key.contains("device_id")) {
+            pickerBuilder.setMessage(UiLanguage.text(activity,
+                    "警告：此项可能增加请求频率、改变设备标识或触发服务器风控。启用后果由使用者自行承担。",
+                    "Warning: this may increase request frequency, change device identity, or trigger "
+                            + "server risk controls. Use at your own risk."));
+        }
+        final String linkedParameterKey = "kv_remote_settings_pow_prefetch".equals(feature.key)
+                ? "kv_remote_settings_pow_prefetch_count"
+                : "kv_remote_settings_session_prefetch".equals(feature.key)
+                        ? "kv_remote_settings_session_prefetch_count" : null;
+        if (linkedParameterKey != null) {
+            pickerBuilder.setNeutralButton(UiLanguage.text(activity, "编辑预取数量", "Edit prefetch count"),
+                    new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface dialog, int which) {
+                            showParameterEditor(activity,
+                                    RemoteFeatureFlags.parameterForKey(linkedParameterKey));
+                        }
+                    });
+        }
+        AlertDialog dialog = pickerBuilder
                 .setSingleChoiceItems(choices, checked, new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface picker, int which) {
-                        int wanted = which == 1 ? RemoteFeatureFlags.FORCE_ON
+                        final int wanted = which == 1 ? RemoteFeatureFlags.FORCE_ON
                                 : which == 2 ? RemoteFeatureFlags.FORCE_OFF
                                 : RemoteFeatureFlags.FOLLOW;
+                        if (HostCompat.isV241()) {
+                            state.setTag(Boolean.TRUE);
+                            state.setText(UiLanguage.text(activity, "保存中", "Saving"));
+                            picker.dismiss();
+                            RemoteFeatureFlags.setModeV241Async(activity.getClassLoader(),
+                                    feature.key, wanted,
+                                    new RemoteFeatureFlags.WriteCallback() {
+                                        @Override public void onComplete(boolean success) {
+                                            state.setTag(Boolean.FALSE);
+                                            updateState(activity, state, feature.key, dark);
+                                            if (success) {
+                                                Toast.makeText(activity,
+                                                        UiLanguage.text(activity,
+                                                                "原生设置已写入，正在重启 DeepSeek",
+                                                                "Native setting saved; restarting DeepSeek"),
+                                                        Toast.LENGTH_SHORT).show();
+                                                restartHost(activity);
+                                            } else {
+                                                Toast.makeText(activity,
+                                                        UiLanguage.text(activity,
+                                                                "设置保存失败",
+                                                                "Could not save setting"),
+                                                        Toast.LENGTH_SHORT).show();
+                                            }
+                                        }
+                                    });
+                            return;
+                        }
                         if (RemoteFeatureFlags.setMode(
                                 activity.getClassLoader(), feature.key, wanted)) {
                             updateState(activity, state, feature.key, dark);
@@ -257,6 +439,116 @@ final class RemoteFeatureFlagsUi {
                 .setNegativeButton(UiLanguage.text(activity, "取消", "Cancel"), null)
                 .create();
         dialog.show();
+    }
+
+    private static void showParameterEditor(final Activity activity,
+            final RemoteFeatureFlags.Parameter parameter) {
+        if (activity == null || parameter == null) return;
+        final EditText input = new EditText(activity);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        Integer current = RemoteFeatureFlags.parameterValue(activity.getClassLoader(), parameter.key);
+        if (current != null) input.setText(String.valueOf(current.intValue()));
+        input.setSelectAllOnFocus(true);
+        int margin = dp(activity, 24);
+        LinearLayout holder = new LinearLayout(activity);
+        holder.setPadding(margin, 0, margin, 0);
+        holder.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(activity)
+                .setTitle(UiLanguage.text(activity, parameter.zh, parameter.en))
+                .setMessage(UiLanguage.text(activity,
+                        "警告：该值直接写入宿主本地配置。异常值可能导致功能异常，并可能触发服务器风控；后果自负。",
+                        "Warning: this is written directly to the host local configuration. "
+                                + "Invalid values may break functionality or trigger server risk controls."))
+                .setView(holder)
+                .setNegativeButton(UiLanguage.text(activity, "取消", "Cancel"), null)
+                .setPositiveButton(UiLanguage.text(activity, "应用并重启", "Apply and restart"),
+                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(DialogInterface dialog, int which) {
+                                try {
+                                    int wanted = Integer.parseInt(input.getText().toString().trim());
+                                    if (RemoteFeatureFlags.setParameterValue(activity.getClassLoader(),
+                                            parameter.key, wanted)) {
+                                        Toast.makeText(activity, UiLanguage.text(activity,
+                                                "参数已写入，正在重启 DeepSeek",
+                                                "Parameter saved; restarting DeepSeek"),
+                                                Toast.LENGTH_SHORT).show();
+                                        restartHost(activity);
+                                    } else {
+                                        Toast.makeText(activity, UiLanguage.text(activity,
+                                                "保存失败", "Could not save parameter"),
+                                                Toast.LENGTH_SHORT).show();
+                                    }
+                                } catch (Throwable error) {
+                                    Toast.makeText(activity, UiLanguage.text(activity,
+                                            "请输入 32 位整数范围内的数值", "Enter a 32-bit integer"),
+                                            Toast.LENGTH_SHORT).show();
+                                }
+                            }
+                        }).show();
+    }
+
+    private static void addV241NativeMultiSelectRow(final Activity activity,
+            LinearLayout parent, int text, int secondary, boolean dark) {
+        LinearLayout row = new LinearLayout(activity);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(activity, 16), dp(activity, 13),
+                dp(activity, 14), dp(activity, 13));
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setBackground(touchBackground(dark, false));
+
+        LinearLayout labels = new LinearLayout(activity);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        TextView heading = new TextView(activity);
+        heading.setText(UiLanguage.text(activity,
+                "原生聊天记录多选", "Native chat multi-select"));
+        heading.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        heading.setTextColor(text);
+        labels.addView(heading);
+        TextView detail = new TextView(activity);
+        detail.setText(UiLanguage.text(activity,
+                "code257 已内置于会话长按菜单，没有独立服务器灰度键。",
+                "Built into code257's chat long-press menu; it has no separate server flag."));
+        detail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        detail.setTextColor(secondary);
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        detailParams.topMargin = dp(activity, 3);
+        labels.addView(detail, detailParams);
+        LinearLayout.LayoutParams labelsParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        labelsParams.rightMargin = dp(activity, 10);
+        row.addView(labels, labelsParams);
+
+        TextView state = new TextView(activity);
+        state.setText(UiLanguage.text(activity, "原生内置", "Built in"));
+        state.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        state.setTextColor(DeekseepUi.BRAND);
+        state.setGravity(Gravity.CENTER);
+        state.setPadding(dp(activity, 8), dp(activity, 5),
+                dp(activity, 8), dp(activity, 5));
+        GradientDrawable badge = new GradientDrawable();
+        badge.setColor(dark ? 0xFF36363A : 0xFFF0F2F7);
+        badge.setCornerRadius(dp(activity, 7));
+        state.setBackground(badge);
+        row.addView(state, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View ignored) {
+                new AlertDialog.Builder(activity)
+                        .setTitle(UiLanguage.text(activity,
+                                "原生聊天记录多选", "Native chat multi-select"))
+                        .setMessage(UiLanguage.text(activity,
+                                "已在 DeepSeek 2.4.1/code257 中确认原生多选页面、长按菜单入口和批量接口。该版本没有对应的独立远程灰度键，因此这里显示真实内置状态，不写入无效伪开关。",
+                                "The native selection screen, long-press entry, and batch APIs are present in DeepSeek 2.4.1/code257. This build has no independent remote flag, so this row reports the real built-in state instead of writing a non-functional synthetic key."))
+                        .setPositiveButton(UiLanguage.text(activity, "知道了", "OK"), null)
+                        .show();
+            }
+        });
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private static void updateState(Activity activity, TextView view, String key, boolean dark) {

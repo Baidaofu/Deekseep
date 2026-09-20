@@ -29,6 +29,30 @@ final class GoogleLoginUnlock {
         return unlocked;
     }
 
+    /** Adds the host's password/email option near Google when that native option exists. */
+    static List<?> ensurePasswordAfterGoogle(Object raw, Object googleOption,
+                                             Object passwordOption, Class<?> optionType) {
+        if (!(raw instanceof List) || passwordOption == null || optionType == null) {
+            return raw instanceof List ? (List<?>) raw : null;
+        }
+        List<?> source = (List<?>) raw;
+        if (source.isEmpty()) return source;
+
+        int googleIndex = -1;
+        int passwordIndex = -1;
+        for (int i = 0; i < source.size(); i++) {
+            Object item = source.get(i);
+            if (item != null && !optionType.isInstance(item)) return source;
+            if (same(item, googleOption)) googleIndex = i;
+            if (same(item, passwordOption)) passwordIndex = i;
+        }
+        if (passwordIndex >= 0) return source;
+
+        ArrayList<Object> unlocked = new ArrayList<Object>(source);
+        unlocked.add(googleIndex >= 0 ? googleIndex + 1 : 0, passwordOption);
+        return unlocked;
+    }
+
     /**
      * Adds the host's native WeChat and SMS/mobile-number options to an already populated
      * login-method list.  When Google is present they are placed immediately after it; otherwise

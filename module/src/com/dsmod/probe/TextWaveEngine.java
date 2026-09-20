@@ -36,19 +36,25 @@ final class TextWaveEngine {
     private static final float DIAGONAL = 0.70710677f;
     private static final Map<Paint, ShaderEntry> SHADERS =
             Collections.synchronizedMap(new WeakHashMap<Paint, ShaderEntry>());
-    private static final Map<Object, Boolean> COMPOSE_TEXT_NODES =
-            Collections.synchronizedMap(new WeakHashMap<Object, Boolean>());
+    private static final Map<Object, Long> COMPOSE_TEXT_NODES =
+            Collections.synchronizedMap(new WeakHashMap<Object, Long>());
     private static volatile Method composeNodeInvalidate;
     private static volatile WeakReference<Activity> activityRef = new WeakReference<>(null);
     private static final AtomicInteger frameGeneration = new AtomicInteger();
     private static final AtomicBoolean activeLogged = new AtomicBoolean(false);
     private static final AtomicBoolean framesLogged = new AtomicBoolean(false);
     private static volatile float cachedSpeed = Float.NaN;
+    private static volatile int cachedEnabled = -1;
+    private static volatile long lastTextDrawAt;
 
     private TextWaveEngine() {}
 
     static boolean isEnabled() {
-        return new File(ENABLED_FILE).isFile();
+        int value = cachedEnabled;
+        if (value >= 0) return value == 1;
+        boolean enabled = new File(ENABLED_FILE).isFile();
+        cachedEnabled = enabled ? 1 : 0;
+        return enabled;
     }
 
     static boolean setEnabled(Activity activity, boolean enabled) {
@@ -60,12 +66,14 @@ final class TextWaveEngine {
                 FileWriter writer = new FileWriter(marker, false);
                 writer.write("1");
                 writer.close();
+                cachedEnabled = 1;
                 activeLogged.set(false);
                 framesLogged.set(false);
                 start(activity);
             } else {
                 invalidateComposeNodes();
                 if (marker.exists() && !marker.delete()) return false;
+                cachedEnabled = 0;
                 stop(activity);
                 invalidateNativeText(activity);
             }
@@ -115,7 +123,7 @@ final class TextWaveEngine {
         if (node == null || invalidator == null) return;
         invalidator.setAccessible(true);
         composeNodeInvalidate = invalidator;
-        COMPOSE_TEXT_NODES.put(node, Boolean.TRUE);
+        COMPOSE_TEXT_NODES.put(node, Long.valueOf(SystemClock.uptimeMillis()));
     }
 
     static PaintState apply(Paint paint, float density) {
@@ -149,6 +157,7 @@ final class TextWaveEngine {
         entry.shader.setLocalMatrix(entry.matrix);
         Shader previous = paint.getShader();
         paint.setShader(entry.shader);
+        lastTextDrawAt = SystemClock.uptimeMillis();
         if (activeLogged.compareAndSet(false, true)) {
             Main.log("text wave paint active wavelength=" + Math.round(wavelength)
                     + " speed=" + speed());
@@ -169,21 +178,42 @@ final class TextWaveEngine {
         if (decor == null) return;
         decor.post(new Runnable() {
             int frame;
+            boolean initialProbeRequested;
             @Override public void run() {
                 Activity current = activityRef.get();
                 if (generation != frameGeneration.get() || current != activity
                         || !isEnabled() || activity.isFinishing()
                         || (Build.VERSION.SDK_INT >= 17 && activity.isDestroyed())) return;
+                if (!decor.isShown() || !activity.hasWindowFocus()) {
+                    // A paused Activity normally stops the generation through Main.onPause, but
+                    // focus can be lost without a lifecycle transition (shade, dialog, PiP).
+                    // Never drive rendering while the host is not actually visible to the user.
+                    decor.postDelayed(this, 500L);
+                    return;
+                }
+                long now = SystemClock.uptimeMillis();
+                if (lastTextDrawAt == 0L || now - lastTextDrawAt > 1_500L) {
+                    if (!initialProbeRequested) {
+                        initialProbeRequested = true;
+                        invalidateComposeNodes();
+                        invalidateNativeText(decor);
+                    }
+                    decor.postDelayed(this, 500L);
+                    return;
+                }
                 invalidateComposeNodes();
-                invalidateNativeText(decor);
+                // DeepSeek is Compose-first. Walking the complete Android View tree on every
+                // frame added substantial CPU and display work for almost no visible benefit.
+                // Keep legacy/module TextViews animated at a low frequency instead.
+                if ((frame & 3) == 0) invalidateNativeText(decor);
                 frame++;
                 if (frame == 30 && framesLogged.compareAndSet(false, true)) {
                     Main.log("text wave continuous frames confirmed nodes="
                             + COMPOSE_TEXT_NODES.size());
                 }
-                // 30 fps is visually continuous for a broad colour wave. Android battery saver
-                // halves that again and avoids walking the entire text tree unnecessarily.
-                decor.postDelayed(this, Main.isSystemPowerSaver(activity) ? 66L : 33L);
+                // The wave is deliberately broad and remains continuous at 20 fps. Power saver
+                // uses 10 fps. This bounds both Compose invalidation and vendor display work.
+                decor.postDelayed(this, Main.isSystemPowerSaver(activity) ? 125L : 80L);
             }
         });
     }
@@ -193,15 +223,23 @@ final class TextWaveEngine {
         if (current == null || current == activity) {
             frameGeneration.incrementAndGet();
             activityRef = new WeakReference<>(null);
+            lastTextDrawAt = 0L;
         }
     }
 
     private static void invalidateComposeNodes() {
         Method invalidate = composeNodeInvalidate;
         if (invalidate == null || COMPOSE_TEXT_NODES.isEmpty()) return;
-        List<Object> nodes;
+        List<Object> nodes = new ArrayList<>();
+        long oldestActive = SystemClock.uptimeMillis() - 2_500L;
         synchronized (COMPOSE_TEXT_NODES) {
-            nodes = new ArrayList<>(COMPOSE_TEXT_NODES.keySet());
+            for (Map.Entry<Object, Long> entry : COMPOSE_TEXT_NODES.entrySet()) {
+                Object node = entry.getKey();
+                Long seen = entry.getValue();
+                if (node != null && seen != null && seen.longValue() >= oldestActive) {
+                    nodes.add(node);
+                }
+            }
         }
         for (Object node : nodes) {
             if (node == null) continue;
@@ -229,10 +267,24 @@ final class TextWaveEngine {
     }
 
     private static boolean isProtectedSemanticColor(int color) {
-        float[] hsv = new float[3];
-        Color.colorToHSV(color, hsv);
-        if (hsv[1] < 0.42f) return false;
-        float hue = hsv[0];
+        // This method runs at the final glyph boundary. Avoid Color.colorToHSV(), which allocates
+        // an array for every text draw and causes visible GC churn on long conversations.
+        float red = Color.red(color) / 255f;
+        float green = Color.green(color) / 255f;
+        float blue = Color.blue(color) / 255f;
+        float maximum = Math.max(red, Math.max(green, blue));
+        float minimum = Math.min(red, Math.min(green, blue));
+        float delta = maximum - minimum;
+        if (maximum <= 0f || delta / maximum < 0.42f) return false;
+        float hue;
+        if (maximum == red) {
+            hue = 60f * (((green - blue) / delta) % 6f);
+        } else if (maximum == green) {
+            hue = 60f * (((blue - red) / delta) + 2f);
+        } else {
+            hue = 60f * (((red - green) / delta) + 4f);
+        }
+        if (hue < 0f) hue += 360f;
         // Preserve destructive, warning and success text. Existing blue accents join the wave.
         return hue < 185f || hue > 255f;
     }

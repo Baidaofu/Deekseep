@@ -692,6 +692,36 @@ final class ChatAppearance {
         }
     }
 
+    /** Compatibility gate used by the host hooks. */
+    static boolean hasEnabledRuntimeEffects() {
+        Config config = load();
+        // The assistant avatar is independent of the appearance master switch. Importing an
+        // avatar must activate the host painter even when wallpapers and bubbles are disabled.
+        boolean hasAssistantAvatar = config.assistantAvatarFile != null
+                && config.assistantAvatarFile.length() > 0
+                && assistantAvatarFileForRender() != null;
+        return hasAssistantAvatar || (config.enabled && (config.hasVisuals()
+                || config.bubbleRenderingEnabled()
+                || config.glassRenderingEnabled()
+                || config.spatialRenderingEnabled()
+                || config.shakeParallaxEnabled));
+    }
+
+    /** The restored UI has no native image-preview overlay boundary to manage. */
+    static void onNativeBackNavigation(Activity activity) {
+        // Intentionally empty: native back handling remains owned by DeepSeek.
+    }
+
+    /** Pointer events remain owned by the host so the restored UI cannot consume chat gestures. */
+    static void onHostPointerEvent(Activity activity, MotionEvent event) {
+        // Intentionally empty: the runtime overlay is non-interactive.
+    }
+
+    /** Refresh the restored overlay after a native image preview finishes rendering. */
+    static void onNativeImagePreviewRendered(Activity activity) {
+        if (activity != null) refresh();
+    }
+
     /**
      * Returns only the tiny immutable-for-this-render snapshot needed by the Compose hooks.
      * Message rows are composed frequently, so avoid copying the wallpaper and page-sticker
@@ -887,6 +917,9 @@ final class ChatAppearance {
                 if (old.length() > 0 && !isAssetUsed(config, old)) {
                     new File(ASSET_DIR, safeAssetName(old)).delete();
                 }
+                // The picker result can arrive after the host resume callback. Install the
+                // native painter immediately so this does not require a process restart.
+                Main.activateOptionalHooksNow();
                 refresh();
                 return new ImportResult(true, "DeepSeek 头像已更新", null);
             } catch (Throwable t) {
@@ -1230,16 +1263,16 @@ final class ChatAppearance {
         float alpha;
         if ("outline".equals(style.preset)) {
             rgb = user ? 0xFF6D89F7 : (dark ? 0xFFDDE4F4 : 0xFF818894);
-            alpha = 0.78f;
+            alpha = 0.92f;
         } else if ("liquid".equals(style.preset)) {
             rgb = 0xFFFFFFFF;
-            alpha = dark ? 0.15f : 0.18f;
+            alpha = dark ? 0.48f : 0.56f;
         } else if ("glass".equals(style.preset)) {
             rgb = dark ? 0xFFFFFFFF : (user ? 0xFFADC0FF : 0xFFFFFFFF);
-            alpha = dark ? 0.30f : 0.70f;
+            alpha = dark ? 0.62f : 0.78f;
         } else {
             rgb = user ? 0xFF9FB4F7 : (dark ? 0xFFFFFFFF : 0xFFC7CAD2);
-            alpha = dark ? 0.22f : 0.42f;
+            alpha = dark ? 0.58f : 0.66f;
         }
         return withAlpha(rgb, alpha * Math.max(0.35f, style.opacity));
     }

@@ -69,7 +69,7 @@ public final class ChatEditorUi {
 
     private static final String DB_DIR = "/data/data/com.deepseek.chat/databases";
     private static final String LOCAL_SESSION_DIR =
-            "/data/data/com.deepseek.chat/files/deekseep_local_sessions";
+            "/data/data/com.deepseek.chat/files/dq0_els";
     private static final Object LOCAL_SESSION_LOCK = new Object();
     private static final Object CREATE_SESSION_LOCK = new Object();
     private static final HashMap<String, Object[]> RECENT_BLANK_CREATES = new HashMap<>();
@@ -286,6 +286,16 @@ public final class ChatEditorUi {
         return out;
     }
 
+    /** Cheap cold-start guard: avoid opening every host database when no editor sidecar exists. */
+    static boolean hasLocalSessionBackups() {
+        File[] files = new File(LOCAL_SESSION_DIR).listFiles();
+        if (files == null) return false;
+        for (File file : files) {
+            if (file != null && file.isFile() && file.getName().endsWith(".json")) return true;
+        }
+        return false;
+    }
+
     static String currentAccountId(ClassLoader cl) {
         try {
             Class<?> mmkv = Class.forName("com.tencent.mmkv.MMKV", false, cl);
@@ -362,7 +372,7 @@ public final class ChatEditorUi {
         return m;
     }
 
-    private static Long currentMessageId(SQLiteDatabase db, String sid) {
+    static Long currentMessageId(SQLiteDatabase db, String sid) {
         Cursor c = null;
         try {
             c = db.rawQuery("SELECT current_message_id FROM chat_session_list WHERE id=?", new String[]{sid});
@@ -938,7 +948,9 @@ public final class ChatEditorUi {
             c = db.rawQuery("SELECT id,model_type FROM chat_session_list", null);
             while (c.moveToNext()) {
                 String sid = c.getString(0);
-                if (sid != null) sessionModels.put(sid, c.getString(1));
+                if (sid != null && !Main.isLocalApiInternalSession(sid)) {
+                    sessionModels.put(sid, c.getString(1));
+                }
             }
         } catch (Throwable ignored) {
         } finally { if (c != null) { c.close(); c = null; } }
@@ -950,8 +962,10 @@ public final class ChatEditorUi {
         } finally { if (c != null) c.close(); }
         final String tablePrefix = "chat_session_messages_";
         for (String table : tables) {
-            String sourceModel = table.startsWith(tablePrefix)
-                    ? sessionModels.get(table.substring(tablePrefix.length())) : null;
+            String sid = table.startsWith(tablePrefix)
+                    ? table.substring(tablePrefix.length()) : null;
+            if (sid != null && Main.isLocalApiInternalSession(sid)) continue;
+            String sourceModel = sid == null ? null : sessionModels.get(sid);
             try {
                 c = db.rawQuery("SELECT fragments FROM " + quoteIdent(table)
                         + " WHERE role='USER' AND fragments LIKE '%FILE%'", null);
@@ -1184,6 +1198,62 @@ public final class ChatEditorUi {
         return out;
     }
 
+    /**
+     * Editor sessions that can safely be exposed through DeepSeek's native history UI.
+     *
+     * <p>The host does not have a persistent, selectable representation for a conversation whose
+     * {@code current_message_id} is null. Publishing such a sidecar creates a row that looks valid
+     * in the drawer but is treated as server-deleted when opened. Keep truly blank drafts inside
+     * the editor; the first USER/ASSISTANT append supplies a head and immediately publishes it.</p>
+     */
+    static HashSet<String> localSessionDisplayIdsFromBackups(File database) {
+        HashSet<String> out = new HashSet<>();
+        if (database == null) return out;
+        try {
+            String prefix = uuidOf(database) + "__";
+            File[] backups = new File(LOCAL_SESSION_DIR).listFiles();
+            if (backups == null) return out;
+            for (File backup : backups) {
+                if (backup == null || !backup.isFile()) continue;
+                String name = backup.getName();
+                if (!name.startsWith(prefix) || !name.endsWith(".json")) continue;
+                String sid = name.substring(prefix.length(), name.length() - 5);
+                if (!validSid(sid)) continue;
+                JSONObject root = new JSONObject(readText(backup));
+                JSONArray session = root.optJSONArray("session");
+                JSONArray messages = root.optJSONArray("messages");
+                if (sid.equals(root.optString("sid", ""))
+                        && session != null && session.length() == 11
+                        && !session.isNull(7) && messages != null && messages.length() > 0) {
+                    out.add(sid);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
+    static HashSet<String> localSessionDisplayIdsFromAllBackups() {
+        HashSet<String> out = new HashSet<>();
+        try {
+            File[] backups = new File(LOCAL_SESSION_DIR).listFiles();
+            if (backups == null) return out;
+            for (File backup : backups) {
+                if (backup == null || !backup.isFile() || !backup.getName().endsWith(".json")) {
+                    continue;
+                }
+                JSONObject root = new JSONObject(readText(backup));
+                String sid = root.optString("sid", "");
+                JSONArray session = root.optJSONArray("session");
+                JSONArray messages = root.optJSONArray("messages");
+                if (validSid(sid) && session != null && session.length() == 11
+                        && !session.isNull(7) && messages != null && messages.length() > 0) {
+                    out.add(sid);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
     /** Used by the cloud-prune hook, whose WCDB repository already scopes rows to one account. */
     static HashSet<String> localSessionIdsFromAllBackups() {
         HashSet<String> out = new HashSet<>();
@@ -1200,6 +1270,114 @@ public final class ChatEditorUi {
             }
         } catch (Throwable ignored) {}
         return out;
+    }
+
+    /** Minimal sidebar metadata from the durable sidecar; never reads message contents. */
+    static Object[] localSessionNativeMetadata(String wantedSid) {
+        if (!validSid(wantedSid)) return null;
+        try {
+            File[] backups = new File(LOCAL_SESSION_DIR).listFiles();
+            if (backups == null) return null;
+            for (File backup : backups) {
+                if (backup == null || !backup.isFile() || !backup.getName().endsWith(".json")) {
+                    continue;
+                }
+                String name = backup.getName();
+                if (!name.endsWith("__" + wantedSid + ".json")) continue;
+                JSONObject root = new JSONObject(readText(backup));
+                JSONArray session = root.optJSONArray("session");
+                if (!wantedSid.equals(root.optString("sid", ""))
+                        || session == null || session.length() != 11) continue;
+                String title = session.isNull(1) ? "新对话" : session.optString(1, "新对话");
+                String titleType = session.isNull(2) ? "SYSTEM" : session.optString(2, "SYSTEM");
+                double inserted = session.isNull(5)
+                        ? System.currentTimeMillis() / 1000.0d : session.optDouble(5);
+                double updated = session.isNull(6) ? inserted : session.optDouble(6, inserted);
+                return new Object[]{title, titleType, Double.valueOf(inserted),
+                        Double.valueOf(updated)};
+            }
+        } catch (Throwable error) {
+            Main.log("read local sidebar metadata failed sid=" + wantedSid + " err=" + error);
+        }
+        return null;
+    }
+
+    /** Exact code257 fallback: WCDB 2.x can keep compressed pages invisible to framework SQLite. */
+    static List<Object[]> localSessionNativeMessageRows(String wantedSid) {
+        ArrayList<Object[]> out = new ArrayList<>();
+        if (!HostCompat.isV241() || !validSid(wantedSid)) return out;
+        synchronized (LOCAL_SESSION_LOCK) {
+            try {
+                File[] backups = new File(LOCAL_SESSION_DIR).listFiles();
+                if (backups == null) return out;
+                for (File backup : backups) {
+                    if (backup == null || !backup.isFile()
+                            || !backup.getName().endsWith("__" + wantedSid + ".json")) continue;
+                    JSONObject root = new JSONObject(readText(backup));
+                    if (!wantedSid.equals(root.optString("sid", ""))) continue;
+                    JSONArray messages = root.optJSONArray("messages");
+                    if (messages == null) continue;
+                    for (int i = 0; i < messages.length(); i++) {
+                        JSONArray row = messages.optJSONArray(i);
+                        if (row == null || row.length() != 13) continue;
+                        Object[] values = new Object[13];
+                        for (int j = 0; j < values.length; j++) {
+                            values[j] = row.isNull(j) ? null : row.get(j);
+                        }
+                        out.add(values);
+                    }
+                    return out;
+                }
+            } catch (Throwable error) {
+                Main.log("read code257 local message sidecar failed sid=" + wantedSid
+                        + " err=" + error);
+            }
+        }
+        return out;
+    }
+
+    /** Updates the authoritative code257 sidecar when framework SQLite cannot see WCDB rows. */
+    static boolean saveImageFilesToLocalSessionBackup(SQLiteDatabase db, String sid, long msgId,
+                                                       List<ImageAsset> selected) {
+        if (!HostCompat.isV241() || db == null || !validSid(sid)) return false;
+        synchronized (LOCAL_SESSION_LOCK) {
+            try {
+                String dbId = uuidOf(new File(db.getPath()));
+                File target = new File(LOCAL_SESSION_DIR, dbId + "__" + sid + ".json");
+                if (!target.isFile()) return false;
+                JSONObject root = new JSONObject(readText(target));
+                JSONArray messages = root.optJSONArray("messages");
+                JSONArray session = root.optJSONArray("session");
+                if (messages == null || session == null || session.length() != 11) return false;
+                JSONArray wanted = null;
+                for (int i = 0; i < messages.length(); i++) {
+                    JSONArray row = messages.optJSONArray(i);
+                    if (row != null && row.length() == 13 && row.optLong(0, -1L) == msgId) {
+                        wanted = row;
+                        break;
+                    }
+                }
+                if (wanted == null || wanted.isNull(11)) return false;
+                ArrayList<JSONObject> files = new ArrayList<>();
+                if (selected != null) for (ImageAsset image : selected) {
+                    if (image != null) files.add(cloneObject(image.file));
+                }
+                JSONArray fragments = new JSONArray(wanted.getString(11));
+                wanted.put(11, replaceImageFiles(fragments, files).toString());
+                session.put(3, FREEZE_VERSION);
+                session.put(6, System.currentTimeMillis() / 1000.0d);
+                File temp = new File(LOCAL_SESSION_DIR, target.getName() + ".tmp");
+                FileWriter writer = new FileWriter(temp, false);
+                writer.write(root.toString());
+                writer.close();
+                if (target.exists() && !target.delete()) return false;
+                return temp.renameTo(target);
+            } catch (Throwable error) {
+                Main.log("update code257 image sidecar failed sid=" + sid + " msg=" + msgId
+                        + " err=" + error);
+                return false;
+            }
+        }
     }
 
     private static boolean tableExists(SQLiteDatabase db, String tableName) {
@@ -1305,6 +1483,78 @@ public final class ChatEditorUi {
                 }
             }
             return restored;
+    }
+
+    /**
+     * Re-applies editor-owned rows after DeepSeek appends/synchronizes a later turn. New native
+     * rows are retained, while message IDs present in the sidecar keep the user's edited text.
+     */
+    static boolean reapplyFrozenEdits(String wantedSid) {
+        if (!validSid(wantedSid)) return false;
+        File[] backups = new File(LOCAL_SESSION_DIR).listFiles();
+        if (backups == null) return false;
+        HashMap<String, File> databases = new HashMap<>();
+        for (File file : allDbs()) databases.put(uuidOf(file), file);
+        for (File backup : backups) {
+            if (backup == null || !backup.isFile() || !backup.getName().endsWith(".json")) continue;
+            SQLiteDatabase db = null;
+            boolean began = false;
+            try {
+                JSONObject root = new JSONObject(readText(backup));
+                String sid = root.optString("sid", "");
+                if (!wantedSid.equals(sid)) continue;
+                File database = databases.get(root.optString("db_id", ""));
+                JSONArray session = root.optJSONArray("session");
+                JSONArray messages = root.optJSONArray("messages");
+                if (database == null || session == null || session.length() != 11
+                        || messages == null) continue;
+                db = SQLiteDatabase.openDatabase(database.getPath(), null,
+                        SQLiteDatabase.OPEN_READWRITE);
+                if (!sessionRowExists(db, sid)) continue;
+                createMessageTable(db, sid);
+                Long liveHead = null;
+                Cursor cursor = db.rawQuery(
+                        "SELECT current_message_id FROM chat_session_list WHERE id=?",
+                        new String[]{sid});
+                try {
+                    if (cursor.moveToFirst() && !cursor.isNull(0)) liveHead = cursor.getLong(0);
+                } finally { cursor.close(); }
+
+                db.beginTransactionNonExclusive();
+                began = true;
+                String table = quoteIdent("chat_session_messages_" + sid);
+                for (int i = 0; i < messages.length(); i++) {
+                    JSONArray row = messages.optJSONArray(i);
+                    if (row == null || row.length() != 13) continue;
+                    Object[] values = new Object[13];
+                    for (int j = 0; j < values.length; j++) values[j] = jsonSqlValue(row, j);
+                    db.execSQL("INSERT OR REPLACE INTO " + table
+                                    + "(message_id,parent_id,role,thinking_enabled,status,"
+                                    + "inserted_at,feedback_type,accumulated_token_usage,ban_edit,"
+                                    + "ban_regenerate,tips,fragments,conversation_mode)"
+                                    + " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            values);
+                }
+                Object sidecarHead = jsonSqlValue(session, 7);
+                Object head = liveHead == null ? sidecarHead : liveHead;
+                db.execSQL("UPDATE chat_session_list SET title=?,titleType=?,cache_version=?,"
+                                + "current_message_id=? WHERE id=?",
+                        new Object[]{jsonSqlValue(session, 1), jsonSqlValue(session, 2),
+                                FREEZE_VERSION, head, sid});
+                db.setTransactionSuccessful();
+                db.endTransaction();
+                began = false;
+                backupLocalSession(db, sid);
+                return true;
+            } catch (Throwable error) {
+                Main.log("reapply frozen edits failed sid=" + wantedSid + " err=" + error);
+                return false;
+            } finally {
+                if (began && db != null) try { db.endTransaction(); } catch (Throwable ignored) {}
+                if (db != null) try { db.close(); } catch (Throwable ignored) {}
+            }
+        }
+        return false;
     }
 
     /**
@@ -1575,6 +1825,43 @@ public final class ChatEditorUi {
         Main.unregisterEditorLocalSession(sid);
         Main.markSessionDeletedLocally(sid);
         return true;
+    }
+
+    /** One transaction for a large selection; avoids reopening a WCDB-side table per item. */
+    static int deleteSessionsLocal(SQLiteDatabase db, List<String> ids) {
+        if (db == null || ids == null || ids.isEmpty()) return 0;
+        ArrayList<String> valid = new ArrayList<>();
+        for (String sid : ids) if (validSid(sid) && !valid.contains(sid)) valid.add(sid);
+        if (valid.isEmpty()) return 0;
+        boolean committed = false;
+        db.beginTransaction();
+        try {
+            for (String sid : valid) {
+                db.execSQL("UPDATE chat_session_list SET inserted_at=0 WHERE id=?",
+                        new Object[]{sid});
+                db.delete("chat_session_list", "id=?", new String[]{sid});
+                db.execSQL("DROP TABLE IF EXISTS "
+                        + quoteIdent("chat_session_messages_" + sid));
+            }
+            db.setTransactionSuccessful();
+            committed = true;
+        } catch (Throwable error) {
+            Main.log("batch local session storage cleanup failed: " + error);
+        } finally {
+            try { db.endTransaction(); } catch (Throwable ignored) {}
+        }
+        if (!committed) return 0;
+        int cleaned = 0;
+        for (String sid : valid) {
+            if (!deleteLocalSessionBackup(db, sid)) {
+                Main.log("delete local session sidecar failed sid=" + sid);
+                continue;
+            }
+            Main.unregisterEditorLocalSession(sid);
+            Main.markSessionDeletedLocally(sid);
+            cleaned++;
+        }
+        return cleaned;
     }
 
     // 把本会话的 cache_version 顶到 32 位 int 上限，让 DeepSeek 的会话同步合并跳过它，
@@ -2304,6 +2591,7 @@ public final class ChatEditorUi {
                 if (began) try { sessDb.endTransaction(); } catch (Throwable ignored) {}
             }
             backupLocalSession(sessDb, curSid);
+            if (HostCompat.isV241()) Main.refreshV241EditorLocalSessionAfterEdit(curSid);
             String keepSid = curSid;
             String keepPath = curSession.dbPath;
             curSnapshot = null;
@@ -2605,7 +2893,9 @@ public final class ChatEditorUi {
                         s.updatedAt = c.isNull(2) ? 0d : c.getDouble(2);
                         s.model = c.getString(3);
                         s.cacheVersion = c.isNull(4) ? Integer.MIN_VALUE : c.getInt(4);
-                        if (s.id != null) merged.put(sessionKey(s.dbPath, s.id), s);
+                        if (s.id != null && !Main.isLocalApiInternalSession(s.id)) {
+                            merged.put(sessionKey(s.dbPath, s.id), s);
+                        }
                     }
                 } catch (Throwable ignored) {
                 } finally {
@@ -2622,6 +2912,7 @@ public final class ChatEditorUi {
                 if (row == null || row.length < 4 || row[0] == null) continue;
                 String sid = String.valueOf(row[0]);
                 if (!validSid(sid)) continue;
+                if (Main.isLocalApiInternalSession(sid)) continue;
                 String key = sessionKey(currentPath, sid);
                 Session s = merged.get(key);
                 if (s == null) {
@@ -2741,11 +3032,71 @@ public final class ChatEditorUi {
             return null;
         }
 
+        /** Resolves an account database after an app upgrade or an in-place WCDB replacement. */
+        File findDatabaseForSession(String sid) {
+            if (!validSid(sid)) return null;
+            File sidecarMatch = null;
+            HashSet<String> sidecarDbIds = new HashSet<>();
+            File[] backups = new File(LOCAL_SESSION_DIR).listFiles();
+            if (backups != null) {
+                String suffix = "__" + sid + ".json";
+                for (File backup : backups) {
+                    if (backup == null || !backup.isFile()) continue;
+                    String name = backup.getName();
+                    if (name.endsWith(suffix)) {
+                        sidecarDbIds.add(name.substring(0, name.length() - suffix.length()));
+                    }
+                }
+            }
+            for (File candidate : allDbs()) {
+                if (sidecarDbIds.contains(uuidOf(candidate))) sidecarMatch = candidate;
+                SQLiteDatabase db = null;
+                try {
+                    db = SQLiteDatabase.openDatabase(candidate.getPath(), null,
+                            SQLiteDatabase.OPEN_READONLY);
+                    if (sessionRowExists(db, sid)) return candidate;
+                } catch (Throwable ignored) {
+                } finally {
+                    if (db != null) try { db.close(); } catch (Throwable ignored) {}
+                }
+            }
+            return sidecarMatch;
+        }
+
         void selectSession(Session s) {
             final int token = ++historyLoadToken;
             try { if (sessDb != null) sessDb.close(); } catch (Throwable ignored) {}
             // 会话所属账号库是权威位置；不要把同名 SID 的编辑写入另一个账号库。
-            sessDb = SQLiteDatabase.openDatabase(s.dbPath, null, SQLiteDatabase.OPEN_READWRITE);
+            // DeepSeek can replace/recreate an account database while its cloud directory is
+            // syncing.  A row captured a moment earlier must therefore never be opened without
+            // checking the file again: SQLiteDatabase.openDatabase throws on the UI thread and
+            // the host then presents the local conversation as deleted.
+            File requested = s.dbPath == null ? null : new File(s.dbPath);
+            if (requested == null || !requested.isFile()) {
+                File recovered = findDatabaseForSession(s.id);
+                Main.log("editor session database changed sid=" + s.id
+                        + " recovered="
+                        + (recovered == null ? "none" : recovered.getName()));
+                requested = recovered;
+            }
+            if (requested == null || !requested.isFile()) {
+                sessDb = null;
+                UiLanguage.toast(act, "对话数据库正在切换，请稍后重新打开",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            try {
+                sessDb = SQLiteDatabase.openDatabase(requested.getPath(), null,
+                        SQLiteDatabase.OPEN_READWRITE);
+            } catch (Throwable openError) {
+                sessDb = null;
+                Main.log("open editor session database failed sid=" + s.id
+                        + " path=" + requested.getPath() + " err=" + openError);
+                UiLanguage.toast(act, "对话数据库暂时不可用，请稍后重试",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            s.dbPath = requested.getPath();
             curSid = s.id; curSession = s;
             String title = (s.title != null && s.title.trim().length() > 0) ? s.title : "";
             titleEt.setText(title.length() > 0 ? title
@@ -3252,16 +3603,25 @@ public final class ChatEditorUi {
                 return false;
             }
             boolean began = false;
+            boolean sidecarOnly = false;
             try {
                 synchronized (HistoryBridge.snapshotLock()) {
                     sessDb.beginTransaction(); began = true;
                     if (!saveImageFiles(sessDb, curSid, edit.msgId, selected)) {
-                        throw new IllegalStateException("image update failed");
+                        if (HostCompat.isV241()
+                                && saveImageFilesToLocalSessionBackup(
+                                sessDb, curSid, edit.msgId, selected)) {
+                            sidecarOnly = true;
+                        } else {
+                            throw new IllegalStateException("image update failed");
+                        }
                     }
-                    double now = System.currentTimeMillis() / 1000.0d;
-                    sessDb.execSQL("UPDATE chat_session_list SET cache_version=?,updated_at=?"
-                                    + " WHERE id=?",
-                            new Object[]{FREEZE_VERSION, now, curSid});
+                    if (!sidecarOnly) {
+                        double now = System.currentTimeMillis() / 1000.0d;
+                        sessDb.execSQL("UPDATE chat_session_list SET cache_version=?,updated_at=?"
+                                        + " WHERE id=?",
+                                new Object[]{FREEZE_VERSION, now, curSid});
+                    }
                     sessDb.setTransactionSuccessful();
                 }
             } catch (Throwable t) {
@@ -3271,7 +3631,10 @@ public final class ChatEditorUi {
             } finally {
                 if (began) try { sessDb.endTransaction(); } catch (Throwable ignored) {}
             }
-            boolean backedUp = backupLocalSession(sessDb, curSid);
+            boolean backedUp = sidecarOnly || backupLocalSession(sessDb, curSid);
+            if (backedUp && HostCompat.isV241()) {
+                Main.refreshV241EditorLocalSessionAfterEdit(curSid);
+            }
             Main.log("persisted image selection sid=" + curSid + " msg=" + edit.msgId
                     + " count=" + (selected == null ? 0 : selected.size())
                     + " sidecar=" + backedUp);
@@ -3523,7 +3886,10 @@ public final class ChatEditorUi {
                     curSnapshot = null;
                     curSnapshotOverLocal = false;
                 }
-                backupLocalSession(sessDb, curSid);
+                boolean backedUp = backupLocalSession(sessDb, curSid);
+                if (backedUp && HostCompat.isV241()) {
+                    Main.refreshV241EditorLocalSessionAfterEdit(curSid);
+                }
             }
 
             boolean titleChanged = false;

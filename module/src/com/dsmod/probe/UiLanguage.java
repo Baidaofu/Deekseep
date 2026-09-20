@@ -27,7 +27,7 @@ import java.util.Locale;
  * is rendered.  The standalone module activity safely falls back to its own configuration when the
  * target-private file is inaccessible.</p>
  */
-final class UiLanguage {
+public final class UiLanguage {
     static final String MODE_AUTO = "auto";
     static final String MODE_CHINESE = "chinese";
     static final String MODE_ENGLISH = "english";
@@ -114,22 +114,22 @@ final class UiLanguage {
         }
     }
 
-    static String text(Context context, String zh, String en) {
+    public static String text(Context context, String zh, String en) {
         return isChinese(context) ? value(zh) : value(en);
     }
 
-    static String text(String zh, String en) {
+    public static String text(String zh, String en) {
         return chinese ? value(zh) : value(en);
     }
 
     /** Translate a module-generated runtime status or formatted message. */
-    static String dynamic(Context context, CharSequence value) {
+    public static String dynamic(Context context, CharSequence value) {
         if (value == null) return "";
         return isChinese(context) ? value.toString()
                 : UiLanguageCatalog.toEnglish(value.toString());
     }
 
-    static String dynamic(CharSequence value) {
+    public static String dynamic(CharSequence value) {
         if (value == null) return "";
         return chinese ? value.toString() : UiLanguageCatalog.toEnglish(value.toString());
     }
