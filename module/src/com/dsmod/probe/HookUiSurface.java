@@ -3365,8 +3365,11 @@ final class HookUiSurface {
         } catch (Throwable ignored) {}
     }
 
+    private final AtomicBoolean NATIVE_DUAL_ROOT_HOOK_INSTALLED = new AtomicBoolean(false);
+
     /** Captures only DeepSeek MainActivity's own root Compose lambda, never a module surface. */
     void hookNativeDualChatRoot(final ClassLoader cl) {
+        if (!NATIVE_DUAL_ROOT_HOOK_INSTALLED.compareAndSet(false, true)) return;
         try {
             Class<?> compose = cl.loadClass("androidx.compose.ui.platform.ComposeView");
             int installed = 0;
@@ -3379,10 +3382,17 @@ final class HookUiSurface {
                             Object owner = chain.getThisObject();
                             Object content = chain.getArg(0);
                             if (owner instanceof View && !NativeDualChatBridge.isBuilding()) {
-                                Context context = ((View) owner).getContext();
-                                if (context instanceof Activity) {
-                                    NativeDualChatBridge.capture(
-                                            (Activity) context, content, cl);
+                                Activity activity = null;
+                                Context current = ((View) owner).getContext();
+                                while (current instanceof ContextWrapper) {
+                                    if (current instanceof Activity) {
+                                        activity = (Activity) current;
+                                        break;
+                                    }
+                                    current = ((ContextWrapper) current).getBaseContext();
+                                }
+                                if (activity != null) {
+                                    NativeDualChatBridge.capture(activity, content, cl);
                                 }
                             }
                         } catch (Throwable error) {
@@ -3396,6 +3406,7 @@ final class HookUiSurface {
             }
             Main.log("installed native dual root capture ComposeView.setContent x" + installed);
         } catch (Throwable error) {
+            NATIVE_DUAL_ROOT_HOOK_INSTALLED.set(false);
             Main.log("native dual root capture unavailable: " + error);
         }
     }

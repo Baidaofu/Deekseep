@@ -170,6 +170,13 @@ final class NativeDualChatBridge {
             content = rootContent.get();
             loader = hostLoader;
         }
+        if (loader == null) loader = activity.getClassLoader();
+        if (content == null) {
+            content = findContentFromActivity(activity);
+            if (content != null) {
+                capture(activity, content, loader);
+            }
+        }
         if (content == null || loader == null
                 || !"com.deepseek.chat.MainActivity".equals(activity.getClass().getName())) {
             Toast.makeText(activity, UiLanguage.text(activity,
@@ -200,6 +207,43 @@ final class NativeDualChatBridge {
             workspace = OPEN.remove(activity);
         }
         if (workspace != null) workspace.close();
+    }
+
+    private static Object findContentFromActivity(Activity activity) {
+        if (activity == null || activity.getWindow() == null) return null;
+        View decor = activity.getWindow().getDecorView();
+        return findContentFromView(decor);
+    }
+
+    private static Object findContentFromView(View view) {
+        if (view == null) return null;
+        if ("androidx.compose.ui.platform.ComposeView".equals(view.getClass().getName())) {
+            for (Field field : view.getClass().getDeclaredFields()) {
+                try {
+                    field.setAccessible(true);
+                    Object val = field.get(view);
+                    if (val != null) {
+                        try {
+                            Method getValue = val.getClass().getMethod("getValue");
+                            getValue.setAccessible(true);
+                            Object actualContent = getValue.invoke(val);
+                            if (actualContent != null) {
+                                Main.log("found ComposeView content from field " + field.getName());
+                                return actualContent;
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) view;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                Object found = findContentFromView(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     static synchronized void markHiddenSession(String sessionId) {
@@ -272,9 +316,18 @@ final class NativeDualChatBridge {
         Constructor<?> chosen = null;
         for (Constructor<?> constructor : composeType.getDeclaredConstructors()) {
             Class<?>[] types = constructor.getParameterTypes();
-            if (types.length == 1 && types[0].isInstance(activity)) {
+            if (types.length == 1 && (types[0].isInstance(activity) || types[0].isAssignableFrom(activity.getClass()) || Context.class.isAssignableFrom(types[0]))) {
                 chosen = constructor;
                 break;
+            }
+        }
+        if (chosen == null) {
+            for (Constructor<?> constructor : composeType.getConstructors()) {
+                Class<?>[] types = constructor.getParameterTypes();
+                if (types.length >= 1 && (types[0].isInstance(activity) || types[0].isAssignableFrom(activity.getClass()) || Context.class.isAssignableFrom(types[0]))) {
+                    chosen = constructor;
+                    break;
+                }
             }
         }
         if (chosen == null) throw new NoSuchMethodException("ComposeView(host activity)");
@@ -282,17 +335,25 @@ final class NativeDualChatBridge {
         Object compose;
         synchronized (NativeDualChatBridge.class) { buildingDepth++; }
         try {
-            compose = chosen.newInstance(activity);
+            Class<?>[] pTypes = chosen.getParameterTypes();
+            Object[] args = new Object[pTypes.length];
+            args[0] = activity;
+            for (int i = 1; i < pTypes.length; i++) {
+                args[i] = null;
+            }
+            compose = chosen.newInstance(args);
             View view = (View) compose;
             IsolatedOwners owners = isolatedOwners(activity, loader);
             installOwners(view, activity, loader, owners);
             Method setter = null;
             for (Method method : composeType.getMethods()) {
                 Class<?>[] types = method.getParameterTypes();
-                if ("setContent".equals(method.getName()) && types.length == 1
-                        && types[0].isInstance(content)) {
-                    setter = method;
-                    break;
+                if ("setContent".equals(method.getName()) && types.length == 1) {
+                    if (types[0].isInstance(content) || types[0].isAssignableFrom(content.getClass())) {
+                        setter = method;
+                        break;
+                    }
+                    if (setter == null) setter = method;
                 }
             }
             if (setter == null) throw new NoSuchMethodException("ComposeView.setContent");
@@ -415,8 +476,51 @@ final class NativeDualChatBridge {
         }
     }
 
+    private static void setViewTreeLifecycleOwner(View view, Object owner, ClassLoader loader) {
+        if (view == null || owner == null || loader == null) return;
+        try {
+            Class<?> cls = loader.loadClass("androidx.lifecycle.ViewTreeLifecycleOwner");
+            for (Method m : cls.getMethods()) {
+                if ("set".equals(m.getName()) && m.getParameterTypes().length == 2) {
+                    m.invoke(null, view, owner);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static void setViewTreeViewModelStoreOwner(View view, Object owner, ClassLoader loader) {
+        if (view == null || owner == null || loader == null) return;
+        try {
+            Class<?> cls = loader.loadClass("androidx.lifecycle.ViewTreeViewModelStoreOwner");
+            for (Method m : cls.getMethods()) {
+                if ("set".equals(m.getName()) && m.getParameterTypes().length == 2) {
+                    m.invoke(null, view, owner);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static void setViewTreeSavedStateRegistryOwner(View view, Object owner, ClassLoader loader) {
+        if (view == null || owner == null || loader == null) return;
+        try {
+            Class<?> cls = loader.loadClass("androidx.savedstate.ViewTreeSavedStateRegistryOwner");
+            for (Method m : cls.getMethods()) {
+                if ("set".equals(m.getName()) && m.getParameterTypes().length == 2) {
+                    m.invoke(null, view, owner);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private static void installOwners(View view, Activity activity, ClassLoader loader,
                                       IsolatedOwners owners) {
+        setViewTreeLifecycleOwner(view, owners.lifecycleOwner, loader);
+        setViewTreeViewModelStoreOwner(view, owners.viewModelOwner, loader);
+        setViewTreeSavedStateRegistryOwner(view, owners.savedStateOwner, loader);
+
         String[] names = {"view_tree_lifecycle_owner", "view_tree_view_model_store_owner",
                 "view_tree_saved_state_registry_owner"};
         for (String name : names) {
@@ -547,6 +651,8 @@ final class NativeDualChatBridge {
     private static void installHostWindowOwners(
             View target, Activity activity, ClassLoader loader) {
         if (target == null || activity == null) return;
+        setViewTreeLifecycleOwner(target, activity, loader);
+        setViewTreeSavedStateRegistryOwner(target, activity, loader);
         String[] names = {"view_tree_lifecycle_owner",
                 "view_tree_saved_state_registry_owner"};
         View decor = activity.getWindow() == null

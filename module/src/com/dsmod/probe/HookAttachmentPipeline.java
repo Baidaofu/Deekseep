@@ -286,11 +286,11 @@ final class HookAttachmentPipeline {
 
     // 专家模式解锁旗标（hookExpertUnlock 读它决定是否给 expert 回填 feature 模板）
     static boolean isExpertUnlock() {
-        if (BuildInfo.PROTECTED_BUILD && BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV236()) {
+        if (HostCompat.isV236()) {
             return RemoteFeatureFlags.mode(RemoteFeatureFlags.V236_FORCE_EXPERT_MODEL)
                     == RemoteFeatureFlags.FORCE_ON;
         }
-        if (BuildInfo.PROTECTED_BUILD && BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV241()) {
+        if (HostCompat.isV241()) {
             return RemoteFeatureFlags.mode(RemoteFeatureFlags.V241_FORCE_EXPERT_MODEL)
                     == RemoteFeatureFlags.FORCE_ON;
         }
@@ -619,7 +619,7 @@ final class HookAttachmentPipeline {
     }
 
     private static void applyV241ForcedModelAvailabilityToConstructorArgs(Object[] args) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV241()
+        if (!HostCompat.isV241()
                 || args == null || args.length < 8 || !(args[1] instanceof String)) return;
         String model = (String) args[1];
         String key = "expert".equals(model)
@@ -637,7 +637,7 @@ final class HookAttachmentPipeline {
     }
 
     private static void applyV236ForcedModelAvailabilityToConstructorArgs(Object[] args) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV236()
+        if (!HostCompat.isV236()
                 || args == null || args.length < 8 || !(args[1] instanceof String)) return;
         String model = (String) args[1];
         String key = "expert".equals(model)
@@ -655,7 +655,7 @@ final class HookAttachmentPipeline {
     }
 
     private static void applyV241ForcedModelAvailability(Object config) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV241() || config == null) return;
+        if (!HostCompat.isV241() || config == null) return;
         try {
             String model = String.valueOf(EX_A.get(config));
             String key = "expert".equals(model)
@@ -677,7 +677,7 @@ final class HookAttachmentPipeline {
     }
 
     private static void applyV236ForcedModelAvailability(Object config) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV236() || config == null) return;
+        if (!HostCompat.isV236() || config == null) return;
         try {
             String model = String.valueOf(EX_A.get(config));
             String key = "expert".equals(model)

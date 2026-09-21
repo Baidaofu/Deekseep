@@ -1846,7 +1846,7 @@ public final class DeekseepUi {
                 }));
 
         card.addView(makeDivider(act, divColor));
-        card.addView(simpleSwitchRow(act, "双开模式",
+        View dualChatRow = simpleSwitchRow(act, "双开模式",
                 UiLanguage.text(act,
                         "从界面右侧内缘向左滑，打开两个独立模型会话。开启后此手势优先于“左滑进入设置”。",
                         "Swipe left from the inner right edge to open two independent model chats. When enabled, this gesture takes priority over Swipe left for settings."),
@@ -1861,12 +1861,20 @@ public final class DeekseepUi {
                             button.setChecked(!checked);
                             reverting = false;
                             Toast.makeText(act, UiLanguage.text(act,
-                                    "请先关闭“左滑进入设置”",
-                                    "Turn off Swipe left for settings first"),
+                                    "双开模式设置保存失败",
+                                    "Failed to save dual mode setting"),
                                     Toast.LENGTH_SHORT).show();
                         }
                     }
-                }));
+                });
+        dualChatRow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (Main.isDualChatEnabled()) {
+                    DualChatUi.show(act);
+                }
+            }
+        });
+        card.addView(dualChatRow);
 
         card.addView(makeDivider(act, divColor));
         final TextView[] themeColorDetail = new TextView[1];

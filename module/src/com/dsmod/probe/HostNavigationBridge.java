@@ -25,9 +25,7 @@ final class HostNavigationBridge {
     private HostNavigationBridge() {}
 
     private static boolean supportedBuild() {
-        if (!BuildInfo.PROTECTED_BUILD) return false;
-        if (HostCompat.isV236()) return true;
-        return HostCompat.isV241() && BuildInfo.LOCAL_API_INCLUDED;
+        return HostCompat.isV236() || HostCompat.isV241();
     }
 
     static synchronized void install(Main owner, ClassLoader loader) {

@@ -6,8 +6,6 @@ Deekseep 1.7.5 is the open-source release of Deekseep.
 
 - `Open.apk` — Official Open edition release build with unobfuscated R8 dead-code stripping (8.8MB).
 - `Open-debug.apk` — Official Open edition debug build (32MB).
-- `Deekseep-1.7.5-source.tar.gz` — Complete open-source code archive for this release (5.0MB).
-- `SHA256.txt` — SHA-256 checksums for all release assets.
 
 Due to rampant unauthorized resale and malicious abuse, the Closed edition is no longer published or updated on GitHub. Legitimate users can join the official Telegram community (@Deekseepapp) to obtain Closed builds.
 
@@ -48,11 +46,5 @@ Public open-source repository updates are suspended indefinitely following this 
 - Agent Model Context Protocol (MCP) server integration.
 - Segmented multi-round prompt injection.
 
-## SHA-256 Checksums
- 
-```
-ff93ecc2e8e80d8efd45e3cbe98d4e56b5dd42b78b0c09e7159d95666f8a9d8f  Open.apk
-35902a89c6bc6c4999e06c2fee7819d6e1317240c26edbf86b0934955bedd82b  Open-debug.apk
-cf3dc7bef21f914dcf3c51d0732ed86da1302b53451d6876881f1741da694fb8  Deekseep-1.7.5-source.tar.gz
-```
+
 

@@ -351,12 +351,12 @@ final class RemoteFeatureFlags {
         if (V241_DEFAULT_VOICE_INPUT.equals(feature.key)) return HostCompat.isV241();
         if ((V236_FORCE_EXPERT_MODEL.equals(feature.key)
                         || V236_FORCE_VISION_MODEL.equals(feature.key))
-                && BuildInfo.PROTECTED_BUILD && BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV236()) {
+                && HostCompat.isV236()) {
             return true;
         }
         if ((V241_FORCE_EXPERT_MODEL.equals(feature.key)
                         || V241_FORCE_VISION_MODEL.equals(feature.key))
-                && BuildInfo.PROTECTED_BUILD && BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV241()) {
+                && HostCompat.isV241()) {
             return true;
         }
         return (feature.nativeBoolean && !V241_DEFAULT_VOICE_INPUT.equals(feature.key))

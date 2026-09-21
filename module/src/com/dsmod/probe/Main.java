@@ -1125,6 +1125,8 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
         try { new FileWriter(LOG_PATH, false).close(); } catch (Throwable ignored) {}
         HookLogOverlay.resetSession();
         HostCompat.initialize(cl);
+        try { HookUiSurface.INSTANCE.hookNativeDualChatRoot(cl); }
+        catch (Throwable t) { log("early native dual root hook failed: " + t); }
         // SSL trust bypass intentionally removed: was diagnostic-only for GP 2.5.0 symbol capture.
         final String bootstrapVersion = AndroidManifestVersion.readFromApk(
                 param.appInfo == null ? null : param.appInfo.sourceDir);
@@ -1548,8 +1550,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
         if (!FEATURE_HOOKS_INSTALLED.compareAndSet(false, true)) return;
         log("installAllFeatureHooks: installing all feature hooks (authorized)");
         try {
-            if (BuildInfo.PROTECTED_BUILD && (HostCompat.isV236()
-                    || (BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV241()))) {
+            if (HostCompat.isV236() || HostCompat.isV241()) {
                 HostNavigationBridge.install(this, cl);
             }
             HookAgentPipeline.INSTANCE.hookAgentToolLogRoundedRect(cl);
@@ -2140,14 +2141,12 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
     }
 
     static boolean isLocalChatQuotaUnlockEnabled() {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED) return false;
         if (HostCompat.isV236()) return new File(V236_LOCAL_CHAT_QUOTA_UNLOCK_FILE).isFile();
         if (HostCompat.isV241()) return new File(V241_LOCAL_CHAT_QUOTA_UNLOCK_FILE).isFile();
         return false;
     }
 
     static boolean setLocalChatQuotaUnlockEnabled(boolean enabled) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED) return false;
         try {
             final String markerPath;
             if (HostCompat.isV236()) markerPath = V236_LOCAL_CHAT_QUOTA_UNLOCK_FILE;
@@ -2179,14 +2178,12 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
     }
 
     static boolean isAllFileTypesEnabled() {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED) return false;
         if (HostCompat.isV236()) return new File(V236_ALL_FILE_TYPES_FILE).isFile();
         if (HostCompat.isV241()) return new File(V241_ALL_FILE_TYPES_FILE).isFile();
         return false;
     }
 
     static boolean setAllFileTypesEnabled(boolean enabled) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED) return false;
         try {
             final String marker;
             if (HostCompat.isV236()) marker = V236_ALL_FILE_TYPES_FILE;
@@ -2227,7 +2224,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
 
     /** Exact code249 adapter: pp1.i supplies the Set consumed by n51.x. */
     private void hookV236AllFileTypes(final ClassLoader cl) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV236()
+        if (!HostCompat.isV236()
                 || !V236_ALL_FILE_TYPES_HOOK_INSTALLED.compareAndSet(false, true)) return;
         try {
             final Class<?> repository = cl.loadClass("pp1");
@@ -2269,7 +2266,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
 
     /** Exact code257 adapter: ys1.i supplies the Set consumed by g71.y. */
     private void hookV241AllFileTypes(final ClassLoader cl) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV241()
+        if (!HostCompat.isV241()
                 || !V241_ALL_FILE_TYPES_HOOK_INSTALLED.compareAndSet(false, true)) return;
         try {
             final Class<?> repository = cl.loadClass("ys1");
@@ -2311,7 +2308,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
 
     /** Exact 2.3.6/code249 adapter. uo5.p/q are consumed by l10. */
     private void hookV236LocalChatQuotaUnlock(final ClassLoader cl) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV236()
+        if (!HostCompat.isV236()
                 || !V236_LOCAL_CHAT_QUOTA_HOOKS_INSTALLED.compareAndSet(false, true)) return;
         try {
             final Class<?> configType = cl.loadClass("uo5");
@@ -2363,14 +2360,12 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
     }
 
     static boolean isThinkingCodeCopyEnabled() {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED) return false;
         if (HostCompat.isV236()) return new File(V236_THINKING_CODE_COPY_FILE).isFile();
         if (HostCompat.isV241()) return new File(THINKING_CODE_COPY_FILE).isFile();
         return false;
     }
 
     static boolean setThinkingCodeCopyEnabled(boolean enabled) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED) return false;
         try {
             final String markerPath;
             if (HostCompat.isV236()) markerPath = V236_THINKING_CODE_COPY_FILE;
@@ -2431,7 +2426,9 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
 
     static boolean setDualChatEnabled(boolean enabled) {
         try {
-            if (enabled && isSwipeSettingsEnabled()) return false;
+            if (enabled && isSwipeSettingsEnabled()) {
+                setSwipeSettingsEnabled(false);
+            }
             File marker = new File(DUAL_CHAT_ENABLED_FILE);
             if (enabled) overwriteTextFile(marker.getPath(), "1");
             else if (marker.exists() && !marker.delete()) return false;
@@ -2446,7 +2443,9 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
 
     static boolean setSwipeSettingsEnabled(boolean enabled) {
         try {
-            if (enabled && isDualChatEnabled()) return false;
+            if (enabled && isDualChatEnabled()) {
+                setDualChatEnabled(false);
+            }
             File marker = new File(SWIPE_SETTINGS_ENABLED_FILE);
             if (enabled) overwriteTextFile(marker.getPath(), "1");
             else if (marker.exists() && !marker.delete()) return false;
@@ -3007,13 +3006,13 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
     }
 
     static void setExpertUnlock(boolean on) {
-        if (BuildInfo.PROTECTED_BUILD && BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV236()) {
+        if (HostCompat.isV236()) {
             RemoteFeatureFlags.setMode(hostClassLoader,
                     RemoteFeatureFlags.V236_FORCE_EXPERT_MODEL,
                     on ? RemoteFeatureFlags.FORCE_ON : RemoteFeatureFlags.FOLLOW);
             return;
         }
-        if (BuildInfo.PROTECTED_BUILD && BuildInfo.LOCAL_API_INCLUDED && HostCompat.isV241()) {
+        if (HostCompat.isV241()) {
             RemoteFeatureFlags.setMode(hostClassLoader,
                     RemoteFeatureFlags.V241_FORCE_EXPERT_MODEL,
                     on ? RemoteFeatureFlags.FORCE_ON : RemoteFeatureFlags.FOLLOW);
@@ -6993,7 +6992,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
      * original nullable values are weakly retained and restored when the setting is switched off.
      */
     private void hookV241LocalChatQuotaUnlock(final ClassLoader cl) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV241()
+        if (!HostCompat.isV241()
                 || !V241_LOCAL_CHAT_QUOTA_HOOKS_INSTALLED.compareAndSet(false, true)) return;
         try {
             final Class<?> configType = cl.loadClass("ou5");
@@ -7049,7 +7048,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
      * provider surviving R8 inlining.
      */
     private void hookV236ThinkingCodeCopy(final ClassLoader cl) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV236()
+        if (!HostCompat.isV236()
                 || !V236_THINKING_CODE_COPY_HOOK_INSTALLED.compareAndSet(false, true)) return;
         int installed = 0;
         try {
@@ -7119,7 +7118,7 @@ public class Main extends MainReflectionSupport implements IXposedHookLoadPackag
      * feedback UI, keeping this visually and behaviorally identical to response code blocks.
      */
     private void hookV241ThinkingCodeCopy(final ClassLoader cl) {
-        if (!BuildInfo.PROTECTED_BUILD || !BuildInfo.LOCAL_API_INCLUDED || !HostCompat.isV241()
+        if (!HostCompat.isV241()
                 || !V241_THINKING_CODE_COPY_HOOK_INSTALLED.compareAndSet(false, true)) return;
         int installed = 0;
         try {
