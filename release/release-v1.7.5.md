@@ -21,6 +21,7 @@ Public open-source repository updates are suspended indefinitely following this 
 
 ### 2. Chat & Message Management
 - Multi-select chat batch deletion: One-tap deletion of selected sessions in sidebar.
+- Dual chat mode: Run two independent native chat sessions in split-screen resizable panes.
 - Local quota unlock: Removed local chat count modification limits.
 - Thinking chain code copy: Added one-click copy button for reasoning and thinking code blocks.
 - Anti-recall reliability: Fixed edge cases where recalled messages could disappear and preserved conversation context.
