@@ -314,14 +314,14 @@ class SettingsActivity : ComponentActivity() {
 
     @Composable
     private fun HomePage(padding: PaddingValues) {
-        val activation = if (BuildInfo.PROTECTED_BUILD) activationState() else null
+        val activation = activationState()
         val device = remember { deviceSnapshot() }
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (BuildInfo.PROTECTED_BUILD) item { ActivationCard(activation!!) }
+            item { ActivationCard(activation) }
             item {
                 InfoPanel(
                     icon = Icons.Filled.Info,
