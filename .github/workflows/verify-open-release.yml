@@ -1,0 +1,105 @@
+name: Verify Open release build from source
+
+# Dispatched by the verification harness.  Goal: determine whether the public
+# repository can reproduce the Open.apk published in GitHub Releases.
+# The documented path (scripts/build-all.sh) is already covered by build.yml;
+# this workflow exercises the *undocumented* Gradle project in compose-launcher/,
+# which is the only thing in the repo that matches the released APK's build
+# parameters (compileSdk 37, versionCode 35, Compose, R8 -dontobfuscate).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gradle-open:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: List candidate SDK packages
+        run: |
+          sdkmanager --list 2>/dev/null | grep -E "platforms;android-3[5-9]|build-tools;3[5-9]" | head -40 || true
+
+      - name: Install Android platform and build tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" \
+            || sdkmanager "platforms;android-37" "build-tools;36.0.0" \
+            || sdkmanager "platforms;android-37" "build-tools;35.0.0"
+
+      - name: Install Gradle 9.7.1
+        run: |
+          curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-9.7.1-bin.zip
+          unzip -q /tmp/gradle.zip -d "$HOME/gradle-dist"
+          echo "$HOME/gradle-dist/gradle-9.7.1/bin" >> "$GITHUB_PATH"
+
+      - name: Repository facts (what the Gradle build expects vs what exists)
+        run: |
+          set +e
+          echo "--- compose-launcher tree"; find compose-launcher -type f | sort
+          echo "--- aapt2 override in gradle.properties"; grep -n aapt2FromMavenOverride compose-launcher/gradle.properties
+          echo "--- files referenced by app/build.gradle.kts:"
+          for p in \
+            editions/closed/full-backup-src \
+            module-universal/protected-payload-src \
+            third_party/shi-native/android \
+            third_party/shi-v5-v241/android \
+            compose-launcher/prepare-protected-inputs.sh \
+            compose-launcher/compile-protected-payload.sh \
+            compose-launcher/app/proguard-protected-rules.pro \
+            .private/closed/release-signing.properties \
+            module-universal/assets/rickroll_241.mp4 ; do
+            if [ -e "$p" ]; then echo "PRESENT  $p"; else echo "MISSING  $p"; fi
+          done
+
+      - name: Attempt A - pristine Gradle build, Open, only protectedBuild overridden
+        continue-on-error: true
+        run: |
+          cd compose-launcher
+          gradle :app:assembleRelease -PprotectedBuild=false --no-daemon --stacktrace \
+            2>&1 | tee /tmp/attemptA.log | tail -60
+          echo "attemptA exit: ${PIPESTATUS[0]}"
+
+      - name: Attempt B - Open build with local-only overrides for missing Closed inputs
+        continue-on-error: true
+        run: |
+          cd compose-launcher
+          gradle :app:assembleRelease \
+            -PprotectedBuild=false \
+            -PlocalApiIncluded=false \
+            -Pandroid.aapt2FromMavenOverride= \
+            --no-daemon --stacktrace \
+            2>&1 | tee /tmp/attemptB.log | tail -80
+          echo "attemptB exit: ${PIPESTATUS[0]}"
+
+      - name: Collect produced APKs
+        if: always()
+        run: |
+          mkdir -p /tmp/out
+          find compose-launcher/app/build/outputs -name '*.apk' -exec cp {} /tmp/out/ \; 2>/dev/null || true
+          ls -l /tmp/out || true
+          cp /tmp/attemptA.log /tmp/out/ 2>/dev/null || true
+          cp /tmp/attemptB.log /tmp/out/ 2>/dev/null || true
+
+      - name: Upload logs and APKs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gradle-open-verification
+          path: /tmp/out/
+          if-no-files-found: warn
+          retention-days: 7
