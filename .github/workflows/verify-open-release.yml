@@ -2,13 +2,22 @@ name: Verify Open release build from source
 
 # Dispatched by the verification harness.  Goal: determine whether the public
 # repository can reproduce the Open.apk published in GitHub Releases.
-# The documented path (scripts/build-all.sh) is already covered by build.yml;
-# this workflow exercises the *undocumented* Gradle project in compose-launcher/,
-# which is the only thing in the repo that matches the released APK's build
-# parameters (compileSdk 37, versionCode 35, Compose, R8 -dontobfuscate).
+#
+#   * build.yml (the repo's own CI) only runs scripts/build-all.sh, which is a
+#     hand-rolled aapt2+javac+d8 build and is unrelated to the released APK.
+#   * compose-launcher/ is the only thing in the repo whose build parameters
+#     match the released APK (compileSdk 37, versionCode 35, versionName 1.7.5,
+#     Compose, R8 -dontobfuscate).  It is undocumented and untested by CI.
+#
+# This workflow exercises that path and records exactly where it breaks.
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (tag v1.7.5.1 is the released source)
+        required: false
+        default: v1.7.5.1
 
 permissions:
   contents: read
@@ -20,6 +29,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || 'v1.7.5.1' }}
+          fetch-depth: 0
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -30,16 +42,17 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: List candidate SDK packages
+      - name: Install Android platform 37 and build tools
         run: |
-          sdkmanager --list 2>/dev/null | grep -E "platforms;android-3[5-9]|build-tools;3[5-9]" | head -40 || true
-
-      - name: Install Android platform and build tools
-        run: |
+          set -x
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-37" "build-tools;37.0.0" \
-            || sdkmanager "platforms;android-37" "build-tools;36.0.0" \
-            || sdkmanager "platforms;android-37" "build-tools;35.0.0"
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+          ls "$ANDROID_SDK_ROOT/platforms"
+          # AGP resolves compileSdk 37 as platforms/android-37.
+          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
+            ln -s "$ANDROID_SDK_ROOT/platforms/android-37.0" "$ANDROID_SDK_ROOT/platforms/android-37"
+          fi
+          ls "$ANDROID_SDK_ROOT/platforms"
 
       - name: Install Gradle 9.7.1
         run: |
@@ -50,9 +63,14 @@ jobs:
       - name: Repository facts (what the Gradle build expects vs what exists)
         run: |
           set +e
-          echo "--- compose-launcher tree"; find compose-launcher -type f | sort
-          echo "--- aapt2 override in gradle.properties"; grep -n aapt2FromMavenOverride compose-launcher/gradle.properties
-          echo "--- files referenced by app/build.gradle.kts:"
+          echo "== checked out ref =="
+          git log -1 --format='%H %ad %s' --date=iso
+          git describe --tags --always
+          echo "== compose-launcher tree =="
+          find compose-launcher -type f | sort
+          echo "== aapt2 override in gradle.properties =="
+          grep -n aapt2FromMavenOverride compose-launcher/gradle.properties
+          echo "== paths referenced by app/build.gradle.kts =="
           for p in \
             editions/closed/full-backup-src \
             module-universal/protected-payload-src \
@@ -62,38 +80,44 @@ jobs:
             compose-launcher/compile-protected-payload.sh \
             compose-launcher/app/proguard-protected-rules.pro \
             .private/closed/release-signing.properties \
-            module-universal/assets/rickroll_241.mp4 ; do
+            module-universal/assets/rickroll_241.mp4 \
+            module-universal/assets/LETTER_TO_DEVELOPERS.txt ; do
             if [ -e "$p" ]; then echo "PRESENT  $p"; else echo "MISSING  $p"; fi
           done
 
-      - name: Attempt A - pristine Gradle build, Open, only protectedBuild overridden
+      - name: Attempt A - verbatim Gradle build, Open, only protectedBuild overridden
         continue-on-error: true
         run: |
           cd compose-launcher
+          set +e
           gradle :app:assembleRelease -PprotectedBuild=false --no-daemon --stacktrace \
             2>&1 | tee /tmp/attemptA.log | tail -60
           echo "attemptA exit: ${PIPESTATUS[0]}"
 
-      - name: Attempt B - Open build with local-only overrides for missing Closed inputs
+      - name: Attempt B - Open build with the minimum local overrides for absent Closed inputs
         continue-on-error: true
         run: |
           cd compose-launcher
+          set +e
+          # 1. gradle.properties hardcodes a Termux aapt2 path.
+          sed -i '/aapt2FromMavenOverride/d' gradle.properties
+          # 2. editions/closed/full-backup-src is referenced unconditionally but absent.
+          mkdir -p ../editions/closed/full-backup-src
           gradle :app:assembleRelease \
             -PprotectedBuild=false \
             -PlocalApiIncluded=false \
-            -Pandroid.aapt2FromMavenOverride= \
             --no-daemon --stacktrace \
             2>&1 | tee /tmp/attemptB.log | tail -80
           echo "attemptB exit: ${PIPESTATUS[0]}"
 
-      - name: Collect produced APKs
+      - name: Collect produced APKs and logs
         if: always()
         run: |
           mkdir -p /tmp/out
           find compose-launcher/app/build/outputs -name '*.apk' -exec cp {} /tmp/out/ \; 2>/dev/null || true
-          ls -l /tmp/out || true
           cp /tmp/attemptA.log /tmp/out/ 2>/dev/null || true
           cp /tmp/attemptB.log /tmp/out/ 2>/dev/null || true
+          ls -l /tmp/out || true
 
       - name: Upload logs and APKs
         if: always()
