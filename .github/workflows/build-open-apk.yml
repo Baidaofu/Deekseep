@@ -13,7 +13,16 @@ name: Build Open.apk (working recipe)
 #   3. protectedBuild 默认 true（闭源），必须显式关掉；另有一个仓库里不存在的源码目录要补空
 #   4. AGP 9.3.0 的 lint 需要 JDK 21（文档写的是 17）
 
+# 触发方式：
+#   * push 到 main —— 自动构建并上传 artifact（默认构建 v1.7.5.1，即 Release 对应的源码）
+#   * 手动 Run workflow —— 可以指定任意 ref
+#
+# 原来那个 build.yml（原作者自带的）已经手动 disable 掉了，它跑的是另一条
+# 手写流水线、而且本身是报错的，永远不会产出任何东西。
+
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
